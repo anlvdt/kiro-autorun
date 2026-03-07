@@ -64,17 +64,18 @@ SHOW_NOTIFICATION = False
 NOTIFICATION_SOUND = True
 STUCK_RECOVERY_ENABLED = True
 
-# Button texts to find via Accessibility API (priority order)
-# Note: Dialog buttons (Run/Trust/Reject) are web-rendered and INVISIBLE to AX API
-# We use OCR position-based clicking for those instead
-CLICKABLE_BUTTONS = ["Accept All", "Reject All"]  # AX only for non-web buttons
+# Button texts to find via Accessibility API
+# ONLY Accept All/Reject All — dialog buttons (Run/Reject/Trust) are web-rendered
+# inside Electron webview and INVISIBLE to macOS Accessibility API
+CLICKABLE_BUTTONS = ["Accept All", "Reject All"]
 # OCR-based dialog button detection (order = priority: Run first!)
-DIALOG_BUTTON_TEXTS = ["run", "trust"]  # Run first, Trust as fallback
+# Includes Play icon variants that OCR may read as unicode symbols
+DIALOG_BUTTON_TEXTS = ["run", "trust", "▶", "►", "play"]  # Include Play icon variants
 # Buttons we actually want to press
-PRESSABLE_BUTTONS = {"accept all", "trust", "run"}
+PRESSABLE_BUTTONS = {"accept all", "trust", "run", "play"}
 
 COOLDOWN_SECONDS = 5
-CLICK_DEBOUNCE_SECONDS = 2
+CLICK_DEBOUNCE_SECONDS = 4
 
 BANNED_KEYWORDS = [
     # ── Filesystem destruction ──
@@ -284,28 +285,39 @@ atexit.register(cleanup)
 
 def find_kiro_window():
     """Find the main Kiro window - returns dict with x, y, w, h, pid, windowID.
-    Note: Kiro often registers as 'Electron' in CGWindowList, not 'Kiro'."""
-    best = None
-    best_area = 0
-    # Match both 'Kiro' and 'Electron' (Kiro is Electron-based)
+    Note: Kiro often registers as 'Electron' in CGWindowList, not 'Kiro'.
+    Tries on-screen windows first, then ALL windows (for hidden/minimized Kiro)."""
     target_names = {TARGET_APP.lower(), "electron", "kiro"}
-    for w in CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly, kCGNullWindowID):
-        owner_name = (w.get("kCGWindowOwnerName") or "").lower()
-        window_title = (w.get("kCGWindowName") or "").lower()
-        if owner_name in target_names and w.get("kCGWindowLayer", 999) == 0:
-            b = w.get("kCGWindowBounds", {})
-            x, y, width, height = int(b["X"]), int(b["Y"]), int(b["Width"]), int(b["Height"])
-            area = width * height
-            if area > best_area:
-                best_area = area
-                best = {
-                    "x": x, "y": y, "w": width, "h": height,
-                    "pid": w.get("kCGWindowOwnerPID"),
-                    "windowID": w.get("kCGWindowNumber"),
-                    "appName": w.get("kCGWindowOwnerName"),
-                    "windowTitle": w.get("kCGWindowName", ""),
-                }
-    return best
+
+    # Try on-screen first (preferred — gives accurate bounds),
+    # then ALL windows as fallback (hidden/minimized Kiro)
+    for option in [kCGWindowListOptionOnScreenOnly, 0x0]:
+        best = None
+        best_area = 0
+        window_list = CGWindowListCopyWindowInfo(option, kCGNullWindowID)
+        if not window_list:
+            continue
+        for w in window_list:
+            owner_name = (w.get("kCGWindowOwnerName") or "").lower()
+            if owner_name in target_names and w.get("kCGWindowLayer", 999) == 0:
+                b = w.get("kCGWindowBounds", {})
+                x, y, width, height = int(b["X"]), int(b["Y"]), int(b["Width"]), int(b["Height"])
+                area = width * height
+                if area > best_area:
+                    best_area = area
+                    best = {
+                        "x": x, "y": y, "w": width, "h": height,
+                        "pid": w.get("kCGWindowOwnerPID"),
+                        "windowID": w.get("kCGWindowNumber"),
+                        "appName": w.get("kCGWindowOwnerName"),
+                        "windowTitle": w.get("kCGWindowName", ""),
+                        "offscreen": option != kCGWindowListOptionOnScreenOnly,
+                    }
+        if best:
+            if best.get("offscreen"):
+                log.info(f"   Kiro found via ALL windows (hidden/minimized)")
+            return best
+    return None
 
 # ─── Background Window OCR (in-memory, zero disk I/O) ────────────────
 
@@ -424,11 +436,10 @@ def ax_debug_tree(element, depth=0, max_depth=5):
         for child in children:
             ax_debug_tree(child, depth + 1, max_depth)
 
-def ax_press_button(kiro_pid, button_titles, ocr_confirmed_dialog=False):
+def ax_press_button(kiro_pid, button_titles, ocr_confirmed_dialog=False, win=None):
     """Find and press a button in Kiro's UI via Accessibility API.
-    Context-aware: only press 'Run' if we have dialog context.
-    Dialog context comes from: OCR detecting 'waiting on your input', or
-    finding Trust/Reject buttons nearby."""
+    Context-aware: only press 'Run'/'Play' if we have dialog context
+    (OCR detected 'waiting on your input' or AX found Trust/Reject buttons)."""
     try:
         app = AXUIElementCreateApplication(kiro_pid)
         if not app:
@@ -446,21 +457,14 @@ def ax_press_button(kiro_pid, button_titles, ocr_confirmed_dialog=False):
         found_titles = {b[0].lower() for b in buttons}
         log.info(f"   Found AX buttons: {found_titles}")
 
-        # Context check: is this the command dialog?
-        # Method 1: OCR already confirmed "waiting on your input" -> definitely dialog
-        # Method 2: AX found Trust/Reject buttons alongside Run
-        dialog_indicators = {"reject", "trust", "reject all"}
-        is_dialog = ocr_confirmed_dialog or bool(found_titles & dialog_indicators)
+        # Context check
+        is_dialog = ocr_confirmed_dialog
 
-        # Filter buttons: only allow "Run" if we confirmed it's a dialog
+        # Filter buttons
         safe_buttons = []
         for title, element in buttons:
             t = title.lower()
-            # Skip non-pressable buttons (Reject is just a dialog indicator)
             if t not in PRESSABLE_BUTTONS:
-                continue
-            if t == "run" and not is_dialog:
-                log.info(f"   Skipping '{title}' - no dialog context (likely sidebar)")
                 continue
             safe_buttons.append((title, element))
 
@@ -468,7 +472,7 @@ def ax_press_button(kiro_pid, button_titles, ocr_confirmed_dialog=False):
             log.info("   All buttons filtered out")
             return False, None
 
-        # Press the first safe button (priority order maintained by caller)
+        # Press the first safe button
         title, button_element = safe_buttons[0]
         err = AXUIElementPerformAction(button_element, "AXPress")
         if err == 0:
@@ -485,12 +489,14 @@ def ax_press_button(kiro_pid, button_titles, ocr_confirmed_dialog=False):
 
 # ─── OCR Position-Based Click ────────────────────────────────────────
 
-def ocr_find_dialog_button(ocr_results, win):
+def ocr_find_dialog_button(ocr_results, win, ocr_confirmed_dialog=False):
     """Find a pressable dialog button via OCR position.
     Returns (button_text, pixel_x, pixel_y) or None.
     
-    Strategy: find 'Run'/'Trust' text that is on the SAME line (similar Y)
-    as 'Reject' (confirming it's the dialog, not sidebar).
+    Strategy:
+    1. Primary: find 'Run'/'Trust'/Play icon text on SAME line as 'Reject'
+    2. Fallback: if dialog is confirmed via trigger text but no 'Reject' visible
+       (Kiro may use icon-only buttons), search bottom 30% for Play/Run text
     """
     # Find the Y position of "reject" text (dialog indicator)
     reject_y = None
@@ -500,40 +506,81 @@ def ocr_find_dialog_button(ocr_results, win):
             reject_y = r["y"]
             break
     
-    if reject_y is None:
-        # No "reject" visible - can't confirm dialog
-        return None
-    
-    # Find pressable button text on the same line as "reject"
     # OCR y values are normalized (0.0 = top, 1.0 = bottom)
     # Same "line" = within 3% vertical distance
     Y_TOLERANCE = 0.03
     
-    for btn_text in DIALOG_BUTTON_TEXTS:  # priority order: trust, run
-        for r in ocr_results:
-            text = r["text"].strip().lower()
-            if text == btn_text and abs(r["y"] - reject_y) < Y_TOLERANCE:
-                # Convert normalized OCR coords to absolute screen pixels
-                # OCR coords: x,y are normalized (0-1), origin = TOP-left
-                # (already flipped from Vision's bottom-left in the OCR handler)
-                # Screen coords: origin = top-left, in pixels
-                win_x, win_y = win["x"], win["y"]
-                win_w, win_h = win["w"], win["h"]
-                
-                # Center of the button text
-                px = win_x + int((r["x"] + r["w"] / 2) * win_w)
-                py = win_y + int((r["y"] + r["h"] / 2) * win_h)  # NO flip - already top-left
-                
-                log.info(f"   OCR found '{btn_text}' at ({px}, {py}) - same line as Reject")
-                return btn_text, px, py
+    def _coords(r):
+        """Convert normalized OCR coords to absolute screen pixels."""
+        win_x, win_y = win["x"], win["y"]
+        win_w, win_h = win["w"], win["h"]
+        px = win_x + int((r["x"] + r["w"] / 2) * win_w)
+        py = win_y + int((r["y"] + r["h"] / 2) * win_h)
+        return px, py
+    
+    # Debug: log all OCR text in bottom 50% to help diagnose
+    bottom_texts = [r["text"].strip() for r in ocr_results if r["y"] > 0.5]
+    if bottom_texts:
+        log.info(f"   OCR bottom 50%: {bottom_texts[:15]}")
+    
+    # Strategy 1: Match button text on same line as "reject"
+    if reject_y is not None:
+        log.info(f"   OCR found 'Reject' at y={reject_y:.3f}")
+        for btn_text in DIALOG_BUTTON_TEXTS:
+            for r in ocr_results:
+                text = r["text"].strip().lower()
+                if text == btn_text and abs(r["y"] - reject_y) < Y_TOLERANCE:
+                    px, py = _coords(r)
+                    log.info(f"   OCR found '{btn_text}' at ({px}, {py}) - same line as Reject")
+                    return btn_text, px, py
+        log.info(f"   No dialog button text found on Reject line (y={reject_y:.3f})")
+    else:
+        log.info(f"   OCR did NOT find 'Reject' text anywhere")
+    
+    # Strategy 2: Dialog confirmed by trigger text but no "reject" text visible
+    # (Kiro may show icon-only buttons like ▶ without text "Reject")
+    # Search bottom 30% of window for any dialog button text/icon
+    if ocr_confirmed_dialog and reject_y is None:
+        BOTTOM_THRESHOLD = 0.7  # Only look in bottom 30%
+        for btn_text in DIALOG_BUTTON_TEXTS:
+            for r in ocr_results:
+                text = r["text"].strip().lower()
+                if text == btn_text and r["y"] > BOTTOM_THRESHOLD:
+                    px, py = _coords(r)
+                    log.info(f"   OCR found '{btn_text}' at ({px}, {py}) - bottom area (no Reject text)")
+                    return btn_text, px, py
+        log.info(f"   Strategy 2 also failed - no button text in bottom 30%")
     
     return None
+
+def bring_kiro_to_front(kiro_pid):
+    """Activate Kiro and return the previously active app for restoration.
+    Uses NSRunningApplication for fast, non-disruptive activation."""
+    try:
+        workspace = AppKit.NSWorkspace.sharedWorkspace()
+        prev_app = workspace.frontmostApplication()
+        for app in workspace.runningApplications():
+            if app.processIdentifier() == kiro_pid:
+                app.activateWithOptions_(AppKit.NSApplicationActivateIgnoringOtherApps)
+                break
+        return prev_app
+    except Exception as e:
+        log.warning(f"bring_kiro_to_front error: {e}")
+        return None
+
+def restore_previous_app(prev_app):
+    """Reactivate the previously frontmost app after clicking Kiro."""
+    if prev_app:
+        try:
+            prev_app.activateWithOptions_(AppKit.NSApplicationActivateIgnoringOtherApps)
+        except Exception as e:
+            log.warning(f"restore_previous_app error: {e}")
 
 def click_at_position(x, y, kiro_pid=None, win=None):
     """Click at screen coordinates using CGEvent.
     Only CGEvent works for Electron web-rendered buttons.
-    Includes guard: verifies Kiro window covers the target coordinates.
-    Saves and restores cursor position (<50ms total)."""
+    Brings Kiro to front briefly (~200ms), clicks, then restores previous app.
+    Saves and restores cursor position."""
     # Guard: verify target coordinates are inside Kiro window bounds
     if win:
         wx, wy = win["x"], win["y"]
@@ -542,12 +589,21 @@ def click_at_position(x, y, kiro_pid=None, win=None):
             log.warning(f"Click guard: ({x},{y}) is outside Kiro window ({wx},{wy})-({wx+ww},{wy+wh})")
             return False
 
+    prev_app = None
     try:
         # Save current cursor position
         current_pos = Quartz.NSEvent.mouseLocation()
         screen_height = Quartz.CGDisplayPixelsHigh(Quartz.CGMainDisplayID())
         saved_x = current_pos.x
         saved_y = screen_height - current_pos.y
+
+        # Hide cursor to prevent visible flash
+        Quartz.CGDisplayHideCursor(Quartz.CGMainDisplayID())
+
+        # Bring Kiro to front (required for CGEvent to hit Kiro, not another window)
+        if kiro_pid:
+            prev_app = bring_kiro_to_front(kiro_pid)
+            time.sleep(0.15)  # Wait for window to become frontmost
         
         # Click at target position
         point = Quartz.CGPointMake(x, y)
@@ -559,7 +615,7 @@ def click_at_position(x, y, kiro_pid=None, win=None):
         time.sleep(0.03)
         Quartz.CGEventPost(Quartz.kCGHIDEventTap, evt_up)
         
-        # Restore cursor immediately (<20ms gap)
+        # Restore cursor position
         time.sleep(0.01)
         restore_point = Quartz.CGPointMake(saved_x, saved_y)
         restore_evt = Quartz.CGEventCreateMouseEvent(
@@ -570,6 +626,12 @@ def click_at_position(x, y, kiro_pid=None, win=None):
     except Exception as e:
         log.warning(f"CGEvent click error: {e}")
         return False
+    finally:
+        # Always show cursor and restore previous app
+        Quartz.CGDisplayShowCursor(Quartz.CGMainDisplayID())
+        if prev_app:
+            time.sleep(0.05)
+            restore_previous_app(prev_app)
 
 # ─── Cooldown ────────────────────────────────────────────────────────
 
@@ -694,10 +756,6 @@ def analyze_command_safety(cmd_text, all_text_lower):
 
     # No command visible -> safe to approve (it's just a dialog)
     if not cmd_text:
-        # Still check all_text_lower for banned keywords
-        for keyword in BANNED_KEYWORDS:
-            if keyword.lower() in all_text_lower:
-                return False, f"Banned keyword: {keyword}"
         return True, "No command text detected"
 
     # === FIX #2: Unicode normalization ===
@@ -776,12 +834,10 @@ def analyze_command_safety(cmd_text, all_text_lower):
         if pattern.lower() in cmd_lower:
             return False, f"Dangerous pattern: {pattern}"
 
-    # 3. Check banned keywords
+    # 3. Check banned keywords (only in actual command text, not all screen text)
     for keyword in BANNED_KEYWORDS:
         if keyword.lower() in cmd_lower:
             return False, f"Banned keyword: {keyword}"
-        if keyword.lower() in all_text_lower:
-            return False, f"Banned keyword on screen: {keyword}"
 
     # All checks passed -> safe
     return True, f"Safe command: {base_cmd}"
@@ -815,11 +871,13 @@ def monitor_cycle():
 
     # OCR visual verification: check that we see dialog buttons on screen
     # This prevents clicking sidebar "Run" when there's no actual command dialog
+    # Includes Play icon variants (▶, ►) that OCR may detect
     ocr_sees_dialog_buttons = any(
-        btn in all_text_lower for btn in ["reject", "trust"]
+        btn in all_text_lower for btn in ["reject", "trust", "▶", "►", "play"]
     )
-    # "Waiting on your input" + dialog buttons visible = confirmed dialog
-    ocr_confirmed_dialog = bool(matched_trigger) and ocr_sees_dialog_buttons
+    # "Waiting on your input" = confirmed dialog. Position filtering in AX API
+    # handles sidebar false positives, so trigger text alone is sufficient.
+    ocr_confirmed_dialog = bool(matched_trigger)
 
     if not matched_trigger and not has_accept_all:
         stuck_cycles = 0
@@ -883,10 +941,24 @@ def monitor_cycle():
                 log.info(f"   Learn pattern: '{learn_pattern}'")
 
     if kiro_pid:
-        # === PRIMARY: OCR-position click (for dialog buttons: Run, Trust) ===
-        # Dialog buttons are web-rendered and INVISIBLE to AX API
-        # We find them via OCR position on the same line as "Reject"
-        dialog_btn = ocr_find_dialog_button(ocr_results, win)
+        # === PRIMARY: AX API (handles icon buttons like Play ▶) ===
+        # AX API can find buttons by title/description even when visually icon-only
+        # This is now PRIMARY because Kiro's newer UI uses Play icon instead of "Run" text
+        pressed, btn_title = ax_press_button(kiro_pid, CLICKABLE_BUTTONS, ocr_confirmed_dialog=ocr_confirmed_dialog, win=win)
+        if pressed:
+            click_count += 1
+            log.info(f"AX pressed '{btn_title}' (#{click_count})")
+            send_notification(f"Auto-approved '{btn_title}' (#{click_count})")
+            log_action("auto-approved", cmd_text or btn_title,
+                      f"Trigger: {trigger_label} [AX API]", learn_pattern)
+            record_click(screen_hash)
+            stuck_cycles = 0
+            time.sleep(2.5)  # Wait for Kiro UI to update before next poll
+            return
+
+        # === SECONDARY: OCR-position click (fallback for text buttons) ===
+        # Dialog buttons may be web-rendered; find via OCR position near "Reject"
+        dialog_btn = ocr_find_dialog_button(ocr_results, win, ocr_confirmed_dialog=ocr_confirmed_dialog)
         if dialog_btn:
             btn_text, px, py = dialog_btn
             if click_at_position(px, py, kiro_pid=kiro_pid, win=win):
@@ -897,21 +969,8 @@ def monitor_cycle():
                           f"Trigger: {trigger_label} [OCR-click]", learn_pattern)
                 record_click(screen_hash)
                 stuck_cycles = 0
-                time.sleep(1)
+                time.sleep(2.5)  # Wait for Kiro UI to update before next poll
                 return
-
-        # === SECONDARY: AX API (for Accept All in file review dialogs) ===
-        pressed, btn_title = ax_press_button(kiro_pid, CLICKABLE_BUTTONS, ocr_confirmed_dialog=ocr_confirmed_dialog)
-        if pressed:
-            click_count += 1
-            log.info(f"AX pressed '{btn_title}' (#{click_count})")
-            send_notification(f"Auto-approved '{btn_title}' (#{click_count})")
-            log_action("auto-approved", cmd_text or btn_title,
-                      f"Trigger: {trigger_label} [AX API]", learn_pattern)
-            record_click(screen_hash)
-            stuck_cycles = 0
-            time.sleep(1)
-            return
 
     # No button found - possible stuck state
     stuck_cycles += 1

@@ -25,18 +25,27 @@ export function updateStatusBar(config: AutoRunConfig, running: boolean): void {
             'statusBarItem.warningBackground'
         );
         statusBarItem.color = undefined;
-        statusBarItem.tooltip = 'Kiro AutoRun: DISABLED\nClick to enable';
+        statusBarItem.tooltip = [
+            '⚡ Kiro AutoRun',
+            '━━━━━━━━━━━━━━━━━━',
+            '⊘ Status: DISABLED',
+            '',
+            'Click to enable',
+        ].join('\n');
     } else {
         const stats = approvedCount > 0 || blockedCount > 0
-            ? ` (✅${approvedCount} 🛑${blockedCount})`
+            ? ` ┊ ✓${approvedCount} ✕${blockedCount}`
             : '';
         statusBarItem.text = `$(zap) AutoRun ON${stats}`;
         statusBarItem.backgroundColor = undefined;
         statusBarItem.color = '#3fb950';
         statusBarItem.tooltip = [
-            'Kiro AutoRun: ENABLED',
-            `Banned keywords: ${config.bannedKeywords.length}`,
-            `Poll: ${config.pollInterval}s`,
+            '⚡ Kiro AutoRun — Ops Monitor',
+            '━━━━━━━━━━━━━━━━━━━━━━━━━━━━',
+            `✓ Approved: ${approvedCount}`,
+            `✕ Blocked: ${blockedCount}`,
+            `🛡 Banned keywords: ${config.bannedKeywords.length}`,
+            `⏱ Poll interval: ${config.pollInterval}s`,
             '',
             'Click to disable',
         ].join('\n');
