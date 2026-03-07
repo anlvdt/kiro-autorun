@@ -555,14 +555,44 @@ def ocr_find_dialog_button(ocr_results, win, ocr_confirmed_dialog=False):
 
 def bring_kiro_to_front(kiro_pid):
     """Activate Kiro and return the previously active app for restoration.
-    Uses NSRunningApplication for fast, non-disruptive activation."""
+    Handles hidden, minimized, and background windows.
+    Waits up to 500ms to verify Kiro is actually frontmost."""
     try:
         workspace = AppKit.NSWorkspace.sharedWorkspace()
         prev_app = workspace.frontmostApplication()
+        target_app = None
         for app in workspace.runningApplications():
             if app.processIdentifier() == kiro_pid:
-                app.activateWithOptions_(AppKit.NSApplicationActivateIgnoringOtherApps)
+                target_app = app
                 break
+        
+        if not target_app:
+            log.warning(f"bring_kiro_to_front: app with PID {kiro_pid} not found")
+            return prev_app
+        
+        # Unhide if hidden (Cmd+H)
+        if target_app.isHidden():
+            target_app.unhide()
+        
+        # Activate with ALL windows + ignoring other apps
+        activate_flags = (
+            AppKit.NSApplicationActivateAllWindows |
+            AppKit.NSApplicationActivateIgnoringOtherApps
+        )
+        target_app.activateWithOptions_(activate_flags)
+        
+        # Wait until Kiro is actually frontmost (up to 1.5s for Space switch animation)
+        for i in range(30):
+            time.sleep(0.05)
+            front = workspace.frontmostApplication()
+            if front and front.processIdentifier() == kiro_pid:
+                if i > 5:
+                    log.info(f"   Kiro activated after Space switch ({i*50}ms)")
+                else:
+                    log.info(f"   Kiro activated ({i*50}ms)")
+                return prev_app
+        
+        log.warning(f"bring_kiro_to_front: Kiro did not become frontmost in 1.5s")
         return prev_app
     except Exception as e:
         log.warning(f"bring_kiro_to_front error: {e}")
@@ -603,7 +633,7 @@ def click_at_position(x, y, kiro_pid=None, win=None):
         # Bring Kiro to front (required for CGEvent to hit Kiro, not another window)
         if kiro_pid:
             prev_app = bring_kiro_to_front(kiro_pid)
-            time.sleep(0.15)  # Wait for window to become frontmost
+            time.sleep(0.05)  # Small buffer after verified activation
         
         # Click at target position
         point = Quartz.CGPointMake(x, y)
