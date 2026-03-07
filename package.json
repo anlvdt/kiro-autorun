@@ -1,0 +1,166 @@
+{
+  "name": "kiro-autorun",
+  "displayName": "Kiro AutoRun",
+  "description": "Auto-clicks Run/Accept All for Kiro IDE prompts with banned-keyword safety",
+  "version": "2.1.2",
+  "publisher": "ANLE",
+  "icon": "icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/anlvdt/kiro-autorun"
+  },
+  "homepage": "https://github.com/anlvdt/kiro-autorun",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "kiro",
+    "auto-run",
+    "automation",
+    "ai",
+    "agent"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "kiroAutorun.toggle",
+        "title": "Kiro AutoRun: Toggle ON/OFF"
+      },
+      {
+        "command": "kiroAutorun.showLog",
+        "title": "Kiro AutoRun: Show Command History"
+      },
+      {
+        "command": "kiroAutorun.clearLog",
+        "title": "Kiro AutoRun: Clear History"
+      },
+      {
+        "command": "kiroAutorun.addBanned",
+        "title": "Kiro AutoRun: Add Banned Keyword"
+      },
+      {
+        "command": "kiroAutorun.addTrusted",
+        "title": "Kiro AutoRun: Add Trusted Command Pattern"
+      },
+      {
+        "command": "kiroAutorun.fullAutonomy",
+        "title": "Kiro AutoRun: Toggle Full Autonomy (DANGER: Trust All)"
+      },
+      {
+        "command": "kiroAutorun.showOutput",
+        "title": "Kiro AutoRun: Show Output Log"
+      }
+    ],
+    "configuration": {
+      "title": "Kiro AutoRun",
+      "properties": {
+        "kiroAutorun.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable/disable auto-approval"
+        },
+        "kiroAutorun.pollInterval": {
+          "type": "number",
+          "default": 2,
+          "minimum": 1,
+          "maximum": 30,
+          "description": "Seconds between each screen check"
+        },
+        "kiroAutorun.targetApp": {
+          "type": "string",
+          "default": "Kiro",
+          "description": "Process name of the target IDE"
+        },
+        "kiroAutorun.triggerText": {
+          "type": "string",
+          "default": "waiting on your input",
+          "description": "Legacy: single trigger text for auto-approval detection (OCR). Use triggerTexts for multiple."
+        },
+        "kiroAutorun.triggerTexts": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "waiting on your input"
+          ],
+          "markdownDescription": "**Trigger texts** (OCR). If ANY of these appear on Kiro's window, auto-click is triggered. The extension also auto-detects `Accept All` / `Reject All` buttons (Kiro v0.8+)."
+        },
+        "kiroAutorun.bannedKeywords": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "rm -rf /",
+            "rm -rf ~",
+            "rm -rf /*",
+            "rm -rf .",
+            "sudo rm",
+            "sudo chmod",
+            "sudo chown",
+            "sudo kill",
+            "chmod 777",
+            "chmod -R 777",
+            "curl | sh",
+            "curl | bash",
+            "wget | sh",
+            "wget | bash",
+            "> /dev/",
+            "dd if=",
+            "mkfs.",
+            "git push --force",
+            "git reset --hard",
+            "drop table",
+            "drop database",
+            "truncate table",
+            "shutdown",
+            "reboot",
+            "halt",
+            "kill -9",
+            "killall",
+            ":(){:|:&};:"
+          ],
+          "markdownDescription": "**Banned keywords**. If ANY of these appear on screen when Kiro asks for input, auto-click is BLOCKED."
+        },
+        "kiroAutorun.showNotification": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show macOS notifications on auto-click/block"
+        },
+        "kiroAutorun.notificationSound": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "**Play a sound** when Kiro is waiting for input and auto-click is blocked (banned keyword). Helps when you're away from screen. ([Issue #308](https://github.com/kirodotdev/Kiro/issues/308))"
+        },
+        "kiroAutorun.stuckRecoveryEnabled": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "**Stuck recovery**: when 'Waiting on your input' is detected for ~10 seconds with no clickable button, press Escape to dismiss stuck overlay. ([Issue #2146](https://github.com/kirodotdev/Kiro/issues/2146))"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "./node_modules/.bin/vsce package --no-dependencies --allow-missing-repository"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "@types/node": "^20.0.0",
+    "@vscode/vsce": "^2.15.0",
+    "typescript": "^5.3.0"
+  },
+  "overrides": {
+    "undici": "5.28.4"
+  }
+}
