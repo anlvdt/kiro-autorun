@@ -6,3 +6,4 @@ out/
 /tmp/
 *.bak.*
 .DS_Store
+._*
