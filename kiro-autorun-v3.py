@@ -609,8 +609,16 @@ def restore_previous_app(prev_app):
 def click_at_position(x, y, kiro_pid=None, win=None):
     """Click at screen coordinates using CGEvent.
     Only CGEvent works for Electron web-rendered buttons.
-    Brings Kiro to front briefly (~200ms), clicks, then restores previous app.
-    Saves and restores cursor position."""
+    
+    Non-disruptive behavior:
+    - Same desktop (behind another window): bring to front briefly, click, restore
+    - Different desktop/Space/minimized: skip (don't switch Spaces)
+    """
+    # Guard: skip if Kiro is on another Space/desktop (don't disrupt user)
+    if win and win.get("offscreen"):
+        log.info("   Skipping click - Kiro is on another desktop/Space (won't switch)")
+        return False
+    
     # Guard: verify target coordinates are inside Kiro window bounds
     if win:
         wx, wy = win["x"], win["y"]
