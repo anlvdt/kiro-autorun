@@ -74,8 +74,8 @@ DIALOG_BUTTON_TEXTS = ["run", "trust", "▶", "►", "play"]  # Include Play ico
 # Buttons we actually want to press
 PRESSABLE_BUTTONS = {"accept all", "trust", "run", "play"}
 
-COOLDOWN_SECONDS = 5
-CLICK_DEBOUNCE_SECONDS = 4
+COOLDOWN_SECONDS = 8
+CLICK_DEBOUNCE_SECONDS = 8
 
 BANNED_KEYWORDS = [
     # ── Filesystem destruction ──
@@ -984,7 +984,7 @@ def monitor_cycle():
                       f"Trigger: {trigger_label} [AX API]", learn_pattern)
             record_click(screen_hash)
             stuck_cycles = 0
-            time.sleep(2.5)  # Wait for Kiro UI to update before next poll
+            time.sleep(4)  # Wait for Kiro UI to fully update
             return
 
         # === SECONDARY: OCR-position click (fallback for text buttons) ===
@@ -1000,7 +1000,7 @@ def monitor_cycle():
                           f"Trigger: {trigger_label} [OCR-click]", learn_pattern)
                 record_click(screen_hash)
                 stuck_cycles = 0
-                time.sleep(2.5)  # Wait for Kiro UI to update before next poll
+                time.sleep(4)  # Wait for Kiro UI to fully update
                 return
 
     # No button found - possible stuck state
