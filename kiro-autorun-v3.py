@@ -74,8 +74,8 @@ DIALOG_BUTTON_TEXTS = ["run", "trust", "▶", "►", "play"]  # Include Play ico
 # Buttons we actually want to press
 PRESSABLE_BUTTONS = {"accept all", "trust", "run", "play"}
 
-COOLDOWN_SECONDS = 8
-CLICK_DEBOUNCE_SECONDS = 8
+COOLDOWN_SECONDS = 15         # Same screen hash → block for 15s
+CLICK_DEBOUNCE_SECONDS = 15   # Block ALL clicks for 15s after any click
 
 BANNED_KEYWORDS = [
     # ── Filesystem destruction ──
