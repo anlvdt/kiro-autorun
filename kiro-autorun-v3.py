@@ -74,9 +74,7 @@ DIALOG_BUTTON_TEXTS = ["run", "trust", "▶", "►", "play"]  # Include Play ico
 # Buttons we actually want to press
 PRESSABLE_BUTTONS = {"accept all", "trust", "run", "play"}
 
-COOLDOWN_SECONDS = 30         # Same command → block for 30s
-CLICK_DEBOUNCE_SECONDS = 15   # Block ALL clicks for 15s after any click
-MAX_CLICKS_PER_COMMAND = 2    # Stop after 2 clicks per command (dialog should close by then)
+COOLDOWN_SECONDS = 15         # Block ALL clicks for 15s after any click
 
 BANNED_KEYWORDS = [
     # ── Filesystem destruction ──
@@ -697,17 +695,9 @@ def click_at_position(x, y, kiro_pid=None, win=None):
 # ─── Cooldown ────────────────────────────────────────────────────────
 
 def is_in_cooldown(cmd_text):
-    """Check if we recently clicked for this same command."""
-    global last_click_cmd, last_click_time, click_count
+    """Time-based only: block clicks for COOLDOWN_SECONDS after any click."""
     now = time.time()
-    # Block ALL clicks for CLICK_DEBOUNCE_SECONDS after any click
-    if now - last_click_time < CLICK_DEBOUNCE_SECONDS:
-        return True
-    # Block same command for COOLDOWN_SECONDS
-    if cmd_text and cmd_text == last_click_cmd and now - last_click_time < COOLDOWN_SECONDS:
-        return True
-    # Stop clicking same command after MAX attempts
-    if cmd_text and cmd_text == last_click_cmd and click_count >= MAX_CLICKS_PER_COMMAND:
+    if now - last_click_time < COOLDOWN_SECONDS:
         return True
     return False
 
