@@ -87,8 +87,12 @@ function startBackend(context: vscode.ExtensionContext): void {
     const script = `
 tell application "Terminal"
   do script "${shellCmd.replace(/"/g, '\\"')}"
+  -- Minimize the new window immediately to reduce flash
+  try
+    set miniaturized of front window to true
+  end try
 end tell
-delay 1.5
+delay 0.5
 tell application "System Events"
   set visible of process "Terminal" to false
 end tell

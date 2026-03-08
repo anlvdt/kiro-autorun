@@ -467,10 +467,6 @@ def ax_press_button(kiro_pid, button_titles, ocr_confirmed_dialog=False, win=Non
 
         buttons = ax_find_buttons(app, button_titles)
         if not buttons:
-            # Debug: log what AX elements exist (only once per stuck cycle)
-            if stuck_cycles == 1:
-                log.info("   AX-DEBUG: Scanning for interactive elements...")
-                ax_debug_tree(app)
             return False, None
 
         # Collect what button titles we found
@@ -540,7 +536,8 @@ def ocr_find_dialog_button(ocr_results, win, ocr_confirmed_dialog=False):
     
     # Debug: log all OCR text in bottom 50% to help diagnose
     bottom_texts = [r["text"].strip() for r in ocr_results if r["y"] > 0.5]
-    if bottom_texts:
+    if bottom_texts and bottom_texts != getattr(ocr_find_dialog_button, '_last_bottom', None):
+        ocr_find_dialog_button._last_bottom = bottom_texts
         log.info(f"   OCR bottom 50%: {bottom_texts[:15]}")
     
     # Strategy 1: Match button text on same line as "reject"
@@ -634,8 +631,9 @@ def restore_previous_app(prev_app):
             log.warning(f"restore_previous_app error: {e}")
 
 def click_at_position(x, y, kiro_pid=None, win=None):
-    """Click at screen coordinates using CGEvent.
-    Cursor is hidden during the entire click sequence — invisible to user.
+    """Click at screen coordinates using CGEvent targeted to Kiro's PID.
+    NO focus stealing — click is delivered directly to Kiro even in background.
+    Cursor is hidden during the entire sequence — invisible to user.
     """
     # Guard: verify target coordinates are inside Kiro window bounds
     if win:
@@ -645,7 +643,6 @@ def click_at_position(x, y, kiro_pid=None, win=None):
             log.warning(f"Click guard: ({x},{y}) is outside Kiro window ({wx},{wy})-({wx+ww},{wy+wh})")
             return False
 
-    prev_app = None
     display = Quartz.CGMainDisplayID()
     try:
         # Save cursor position
@@ -654,21 +651,22 @@ def click_at_position(x, y, kiro_pid=None, win=None):
         saved_x = current_pos.x
         saved_y = screen_height - current_pos.y
 
-        # HIDE cursor BEFORE any movement — makes everything invisible
+        # HIDE cursor BEFORE any movement
         Quartz.CGDisplayHideCursor(display)
 
-        # Bring Kiro to front if not already frontmost
-        if kiro_pid:
-            front = AppKit.NSWorkspace.sharedWorkspace().frontmostApplication()
-            if not (front and front.processIdentifier() == kiro_pid):
-                prev_app = bring_kiro_to_front(kiro_pid)
-
-        # Click at target (cursor moves but is hidden)
+        # Create click events targeted at Kiro's PID (no focus steal)
         point = Quartz.CGPointMake(x, y)
         evt_down = Quartz.CGEventCreateMouseEvent(
             None, Quartz.kCGEventLeftMouseDown, point, Quartz.kCGMouseButtonLeft)
         evt_up = Quartz.CGEventCreateMouseEvent(
             None, Quartz.kCGEventLeftMouseUp, point, Quartz.kCGMouseButtonLeft)
+
+        # Target specific window/PID — delivers click without bringing to front
+        if kiro_pid:
+            # kCGEventTargetUnixProcessID = 40
+            Quartz.CGEventSetIntegerValueField(evt_down, 40, kiro_pid)
+            Quartz.CGEventSetIntegerValueField(evt_up, 40, kiro_pid)
+
         Quartz.CGEventPost(Quartz.kCGHIDEventTap, evt_down)
         Quartz.CGEventPost(Quartz.kCGHIDEventTap, evt_up)
 
@@ -678,19 +676,13 @@ def click_at_position(x, y, kiro_pid=None, win=None):
             None, Quartz.kCGEventMouseMoved, restore_point, Quartz.kCGMouseButtonLeft)
         Quartz.CGEventPost(Quartz.kCGHIDEventTap, restore_evt)
 
-        # Small delay to ensure restore event is processed before showing cursor
         time.sleep(0.02)
-
         return True
     except Exception as e:
         log.warning(f"CGEvent click error: {e}")
         return False
     finally:
-        # ALWAYS show cursor and restore previous app
         Quartz.CGDisplayShowCursor(display)
-        if prev_app:
-            time.sleep(0.05)
-            restore_previous_app(prev_app)
 
 # ─── Cooldown ────────────────────────────────────────────────────────
 
@@ -1007,7 +999,7 @@ def monitor_cycle():
             log_action("auto-approved", cmd_text or btn_title,
                       f"Trigger: {trigger_label} [AX API]", learn_pattern)
             stuck_cycles = 0
-            time.sleep(4)  # Wait for Kiro UI to fully update
+            time.sleep(2)  # Wait for Kiro UI to update
             return
 
         # === SECONDARY: OCR-position click (fallback for text buttons) ===
@@ -1022,7 +1014,7 @@ def monitor_cycle():
                 log_action("auto-approved", cmd_text or btn_text,
                           f"Trigger: {trigger_label} [OCR-click]", learn_pattern)
                 stuck_cycles = 0
-                time.sleep(4)  # Wait for Kiro UI to fully update
+                time.sleep(2)  # Wait for Kiro UI to update
                 return
 
     # No button found - possible stuck state
