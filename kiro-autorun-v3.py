@@ -712,13 +712,9 @@ def is_in_cooldown(cmd_text):
     return False
 
 def record_click(cmd_text):
-    """Record a click and return the click count.
-    Resets counter when command changes, then increments.
-    """
+    """Record a click. Returns running total click count."""
     global last_click_cmd, last_click_time, click_count
-    if cmd_text != last_click_cmd:
-        click_count = 0  # New command — reset counter
-    click_count += 1     # Increment AFTER potential reset
+    click_count += 1
     last_click_cmd = cmd_text
     last_click_time = time.time()
     return click_count
