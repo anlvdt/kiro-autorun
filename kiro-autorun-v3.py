@@ -74,7 +74,7 @@ DIALOG_BUTTON_TEXTS = ["run", "trust", "▶", "►", "play"]  # Include Play ico
 # Buttons we actually want to press
 PRESSABLE_BUTTONS = {"accept all", "trust", "run", "play"}
 
-COOLDOWN_SECONDS = 15         # Block ALL clicks for 15s after any click
+COOLDOWN_SECONDS = 5          # Block clicks for 5s after any click (4s sleep + 2s poll = 6s cycle)
 
 BANNED_KEYWORDS = [
     # ── Filesystem destruction ──
