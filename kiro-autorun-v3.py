@@ -708,11 +708,16 @@ def is_in_cooldown(cmd_text):
     return False
 
 def record_click(cmd_text):
+    """Record a click and return the click count.
+    Resets counter when command changes, then increments.
+    """
     global last_click_cmd, last_click_time, click_count
     if cmd_text != last_click_cmd:
         click_count = 0  # New command — reset counter
+    click_count += 1     # Increment AFTER potential reset
     last_click_cmd = cmd_text
     last_click_time = time.time()
+    return click_count
 
 # ─── Notification ────────────────────────────────────────────────────
 
@@ -1006,12 +1011,11 @@ def monitor_cycle():
         # This is now PRIMARY because Kiro's newer UI uses Play icon instead of "Run" text
         pressed, btn_title = ax_press_button(kiro_pid, CLICKABLE_BUTTONS, ocr_confirmed_dialog=ocr_confirmed_dialog, win=win)
         if pressed:
-            click_count += 1
-            log.info(f"AX pressed '{btn_title}' (#{click_count})")
-            send_notification(f"Auto-approved '{btn_title}' (#{click_count})")
+            count = record_click(cmd_text)
+            log.info(f"AX pressed '{btn_title}' (#{count})")
+            send_notification(f"Auto-approved '{btn_title}' (#{count})")
             log_action("auto-approved", cmd_text or btn_title,
                       f"Trigger: {trigger_label} [AX API]", learn_pattern)
-            record_click(cmd_text)
             stuck_cycles = 0
             time.sleep(4)  # Wait for Kiro UI to fully update
             return
@@ -1022,12 +1026,11 @@ def monitor_cycle():
         if dialog_btn:
             btn_text, px, py = dialog_btn
             if click_at_position(px, py, kiro_pid=kiro_pid, win=win):
-                click_count += 1
-                log.info(f"OCR-click pressed '{btn_text}' at ({px},{py}) (#{click_count})")
-                send_notification(f"Auto-approved '{btn_text}' (#{click_count})")
+                count = record_click(cmd_text)
+                log.info(f"OCR-click pressed '{btn_text}' at ({px},{py}) (#{count})")
+                send_notification(f"Auto-approved '{btn_text}' (#{count})")
                 log_action("auto-approved", cmd_text or btn_text,
                           f"Trigger: {trigger_label} [OCR-click]", learn_pattern)
-                record_click(cmd_text)
                 stuck_cycles = 0
                 time.sleep(4)  # Wait for Kiro UI to fully update
                 return
