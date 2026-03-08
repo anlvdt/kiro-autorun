@@ -15,6 +15,7 @@ let outputChannel: vscode.OutputChannel;
 let isRunning = false;
 let actionLogWatcher: ReturnType<typeof setInterval> | undefined;
 let lastActionLogSize = 0;
+let lastActionLogLines = 0;
 
 /**
  * Get the path to the bundled Python script
@@ -62,6 +63,7 @@ function startBackend(context: vscode.ExtensionContext): void {
             fs.writeFileSync(ACTION_LOG_FILE, '', 'utf-8');
         }
         lastActionLogSize = 0;
+        lastActionLogLines = 0;
     } catch {
         // ignore
     }
@@ -162,16 +164,14 @@ function pollActionLog(): void {
         if (stat.size <= lastActionLogSize) {
             return;
         }
+        lastActionLogSize = stat.size;
 
         const data = fs.readFileSync(ACTION_LOG_FILE, 'utf-8');
         const lines = data.trim().split('\n');
 
-        // Process only new lines
-        const allPrevSize = lastActionLogSize;
-        lastActionLogSize = stat.size;
-
-        // If this is the first read, process all lines; otherwise only new ones
-        const startIdx = allPrevSize === 0 ? 0 : Math.max(0, lines.length - Math.ceil((stat.size - allPrevSize) / 50));
+        // Process only lines we haven't seen before
+        const startIdx = lastActionLogLines;
+        lastActionLogLines = lines.length;
 
         for (let i = startIdx; i < lines.length; i++) {
             const line = lines[i].trim();
