@@ -565,19 +565,10 @@ def ocr_find_dialog_button(ocr_results, win, ocr_confirmed_dialog=False):
     else:
         log.info(f"   OCR did NOT find 'Reject' text anywhere")
     
-    # Strategy 2: Dialog confirmed by trigger text but no "reject" text visible
-    # (Kiro may show icon-only buttons like ▶ without text "Reject")
-    # Search bottom 30% of window for any dialog button text/icon
-    if ocr_confirmed_dialog and reject_y is None:
-        BOTTOM_THRESHOLD = 0.7  # Only look in bottom 30%
-        for btn_text in DIALOG_BUTTON_TEXTS:
-            for r in ocr_results:
-                text = r["text"].strip().lower()
-                if text == btn_text and r["y"] > BOTTOM_THRESHOLD:
-                    px, py = _coords(r)
-                    log.info(f"   OCR found '{btn_text}' at ({px}, {py}) - bottom area (no Reject text)")
-                    return btn_text, px, py
-        log.info(f"   Strategy 2 also failed - no button text in bottom 30%")
+    # Strategy 2 DISABLED: If no "Reject" text found, there is no real dialog.
+    # Previously this searched bottom 30% for any "run" text, but it caused
+    # massive false positives from conversation text containing "run".
+    # The Reject button is ALWAYS present when a real command approval dialog shows.
     
     return None
 
