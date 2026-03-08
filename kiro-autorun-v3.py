@@ -334,14 +334,35 @@ def ocr_window(win):
         return []
 
     # Capture specific window in-memory (works when Kiro is in background)
+    # kCGWindowImageBoundsIgnoreFraming excludes window shadow/border
+    # so image dimensions match kCGWindowBounds exactly
     image = CGWindowListCreateImage(
         CGRectNull,  # Capture full window bounds
         kCGWindowListOptionIncludingWindow,
         window_id,
-        kCGWindowImageDefault
+        kCGWindowImageBoundsIgnoreFraming
     )
     if not image:
         return []
+
+    # Diagnostic: log image dimensions vs window bounds (Retina check)
+    img_w = Quartz.CGImageGetWidth(image)
+    img_h = Quartz.CGImageGetHeight(image)
+    if not hasattr(ocr_window, '_diag_done'):
+        ocr_window._diag_done = True
+        log.info(f"   DIAG: image={img_w}x{img_h} window={win['w']}x{win['h']} ratio={img_w/win['w']:.1f}x")
+        # Save image for visual inspection
+        try:
+            from Quartz import CGImageDestinationCreateWithURL, CGImageDestinationAddImage, CGImageDestinationFinalize
+            from CoreFoundation import CFURLCreateWithFileSystemPath, kCFAllocatorDefault, kCFURLPOSIXPathStyle
+            url = CFURLCreateWithFileSystemPath(kCFAllocatorDefault, "/tmp/kiro-debug.png", kCFURLPOSIXPathStyle, False)
+            dest = CGImageDestinationCreateWithURL(url, "public.png", 1, None)
+            if dest:
+                CGImageDestinationAddImage(dest, image, None)
+                CGImageDestinationFinalize(dest)
+                log.info(f"   DIAG: saved /tmp/kiro-debug.png ({img_w}x{img_h})")
+        except Exception as e:
+            log.info(f"   DIAG: could not save image: {e}")
 
     results = []
     completed = [False]
@@ -502,7 +523,7 @@ def ocr_find_dialog_button(ocr_results, win, ocr_confirmed_dialog=False):
     reject_y = None
     for r in ocr_results:
         text = r["text"].strip().lower()
-        if text == "reject" or text == "reject all":
+        if (text == "reject" or text == "reject all") and r["w"] >= 0.02:
             reject_y = r["y"]
             break
     
@@ -530,8 +551,15 @@ def ocr_find_dialog_button(ocr_results, win, ocr_confirmed_dialog=False):
             for r in ocr_results:
                 text = r["text"].strip().lower()
                 if text == btn_text and abs(r["y"] - reject_y) < Y_TOLERANCE:
+                    # Filter out tiny text — real buttons are at least 0.02 wide
+                    if r["w"] < 0.02:
+                        log.info(f"   Skipping tiny '{btn_text}' (w={r['w']:.3f}) — not a real button")
+                        continue
                     px, py = _coords(r)
                     log.info(f"   OCR found '{btn_text}' at ({px}, {py}) - same line as Reject")
+                    log.info(f"   DIAG: win=({win['x']},{win['y']}) {win['w']}x{win['h']}")
+                    log.info(f"   DIAG: norm=({r['x']:.3f},{r['y']:.3f}) size=({r['w']:.3f}x{r['h']:.3f})")
+                    log.info(f"   DIAG: relative=({px-win['x']},{py-win['y']}) %=({(px-win['x'])/win['w']*100:.1f}%,{(py-win['y'])/win['h']*100:.1f}%)")
                     return btn_text, px, py
         log.info(f"   No dialog button text found on Reject line (y={reject_y:.3f})")
     else:
