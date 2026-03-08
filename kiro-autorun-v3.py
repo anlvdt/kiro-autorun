@@ -656,6 +656,12 @@ def click_at_position(x, y, kiro_pid=None, win=None):
 
         if kiro_already_front:
             # Kiro is frontmost — just click, no window switching needed
+            # Save cursor, click, restore — all instant
+            current_pos = Quartz.NSEvent.mouseLocation()
+            screen_height = Quartz.CGDisplayPixelsHigh(Quartz.CGMainDisplayID())
+            saved_x = current_pos.x
+            saved_y = screen_height - current_pos.y
+
             point = Quartz.CGPointMake(x, y)
             evt_down = Quartz.CGEventCreateMouseEvent(
                 None, Quartz.kCGEventLeftMouseDown, point, Quartz.kCGMouseButtonLeft)
@@ -663,6 +669,12 @@ def click_at_position(x, y, kiro_pid=None, win=None):
                 None, Quartz.kCGEventLeftMouseUp, point, Quartz.kCGMouseButtonLeft)
             Quartz.CGEventPost(Quartz.kCGHIDEventTap, evt_down)
             Quartz.CGEventPost(Quartz.kCGHIDEventTap, evt_up)
+
+            # Restore cursor immediately
+            restore_point = Quartz.CGPointMake(saved_x, saved_y)
+            restore_evt = Quartz.CGEventCreateMouseEvent(
+                None, Quartz.kCGEventMouseMoved, restore_point, Quartz.kCGMouseButtonLeft)
+            Quartz.CGEventPost(Quartz.kCGHIDEventTap, restore_evt)
             return True
 
         # Kiro NOT frontmost — need full window switch sequence
