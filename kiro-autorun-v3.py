@@ -551,12 +551,9 @@ def ocr_find_dialog_button(ocr_results, win, ocr_confirmed_dialog=False):
             for r in ocr_results:
                 text = r["text"].strip().lower()
                 if text == btn_text and abs(r["y"] - reject_y) < Y_TOLERANCE:
-                    # Filter out tiny text — real buttons are at least 0.02 wide
-                    if r["w"] < 0.02:
-                        log.info(f"   Skipping tiny '{btn_text}' (w={r['w']:.3f}) — not a real button")
-                        continue
+                    # Strategy 1: Reject on same line = strong signal, no size filter needed
                     px, py = _coords(r)
-                    log.info(f"   OCR found '{btn_text}' at ({px}, {py}) - same line as Reject")
+                    log.info(f"   OCR found '{btn_text}' at ({px}, {py}) - same line as Reject (w={r['w']:.3f})")
                     log.info(f"   DIAG: win=({win['x']},{win['y']}) {win['w']}x{win['h']}")
                     log.info(f"   DIAG: norm=({r['x']:.3f},{r['y']:.3f}) size=({r['w']:.3f}x{r['h']:.3f})")
                     log.info(f"   DIAG: relative=({px-win['x']},{py-win['y']}) %=({(px-win['x'])/win['w']*100:.1f}%,{(py-win['y'])/win['h']*100:.1f}%)")
