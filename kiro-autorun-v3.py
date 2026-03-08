@@ -518,33 +518,6 @@ def ocr_find_dialog_button(ocr_results, win, ocr_confirmed_dialog=False):
     2. Fallback: if dialog is confirmed via trigger text but no 'Reject' visible
        (Kiro may use icon-only buttons), search bottom 30% for Play/Run text
     """
-    def _save_click_debug(win, click_x, click_y, btn_text):
-        """Save window screenshot at click time to /tmp/kiro-click-debug.png"""
-        wid = win.get("windowID")
-        if not wid:
-            return
-        img = Quartz.CGWindowListCreateImage(
-            Quartz.CGRectNull,
-            Quartz.kCGWindowListOptionIncludingWindow,
-            wid, 1)  # kCGWindowImageBoundsIgnoreFraming
-        if not img:
-            return
-        url = CoreFoundation.CFURLCreateWithFileSystemPath(
-            None, "/tmp/kiro-click-debug.png",
-            CoreFoundation.kCFURLPOSIXPathStyle, False)
-        dest = ImageIO.CGImageDestinationCreateWithURL(url, "public.png", 1, None)
-        ImageIO.CGImageDestinationAddImage(dest, img, None)
-        ImageIO.CGImageDestinationFinalize(dest)
-        iw = Quartz.CGImageGetWidth(img)
-        ih = Quartz.CGImageGetHeight(img)
-        # Log click position in image coordinates (2x retina)
-        ratio_x = iw / win["w"]
-        ratio_y = ih / win["h"]
-        img_cx = int((click_x - win["x"]) * ratio_x)
-        img_cy = int((click_y - win["y"]) * ratio_y)
-        log.info(f"   CLICK-DEBUG: saved /tmp/kiro-click-debug.png ({iw}x{ih})")
-        log.info(f"   CLICK-DEBUG: click at image pixel ({img_cx},{img_cy}) for '{btn_text}'")
-
     # Find the Y position of "reject" text (dialog indicator)
     reject_y = None
     for r in ocr_results:
@@ -583,11 +556,6 @@ def ocr_find_dialog_button(ocr_results, win, ocr_confirmed_dialog=False):
                     log.info(f"   DIAG: win=({win['x']},{win['y']}) {win['w']}x{win['h']}")
                     log.info(f"   DIAG: norm=({r['x']:.3f},{r['y']:.3f}) size=({r['w']:.3f}x{r['h']:.3f})")
                     log.info(f"   DIAG: relative=({px-win['x']},{py-win['y']}) %=({(px-win['x'])/win['w']*100:.1f}%,{(py-win['y'])/win['h']*100:.1f}%)")
-                    # Save click-time debug image with marker
-                    try:
-                        _save_click_debug(win, px, py, btn_text)
-                    except Exception as e:
-                        log.warning(f"   Debug image save failed: {e}")
                     return btn_text, px, py
         log.info(f"   No dialog button text found on Reject line (y={reject_y:.3f})")
     else:
@@ -737,9 +705,6 @@ def record_click(cmd_text):
     """Record a click. Returns running total click count."""
     global last_click_cmd, last_click_time, click_count
     click_count += 1
-    import traceback
-    caller = traceback.extract_stack()[-2]
-    log.info(f"   CLICK_COUNT: {click_count} (called from {caller.filename}:{caller.lineno} {caller.name})")
     last_click_cmd = cmd_text
     last_click_time = time.time()
     return click_count
