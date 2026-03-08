@@ -7,6 +7,7 @@ import { getConfig, setConfigValue, writeConfigFile, onConfigChange, ACTION_LOG_
 import {
     createStatusBar, updateStatusBar, disposeStatusBar,
     resetCounts, incrementApproved, incrementBlocked,
+    setStartTime, setBackendHealth, isBackendHealthy,
 } from './statusBar';
 import { loadLog, addEntry, showLogPanel, clearLog } from './commandLog';
 import { applyKiroSettings, setFullAutonomy, addTrustedPattern } from './kiroSettings';
@@ -16,6 +17,7 @@ let isRunning = false;
 let actionLogWatcher: ReturnType<typeof setInterval> | undefined;
 let lastActionLogSize = 0;
 let lastActionLogLines = 0;
+let healthCheckInterval: ReturnType<typeof setInterval> | undefined;
 
 /**
  * Get the path to the bundled Python script
@@ -57,15 +59,20 @@ function startBackend(context: vscode.ExtensionContext): void {
     // Write config for Python to read
     writeConfigFile(config);
 
-    // Clear previous action log so we start fresh
+    // Preserve action log across restarts — count existing lines
     try {
         if (fs.existsSync(ACTION_LOG_FILE)) {
-            fs.writeFileSync(ACTION_LOG_FILE, '', 'utf-8');
+            const data = fs.readFileSync(ACTION_LOG_FILE, 'utf-8');
+            const lines = data.trim().split('\n').filter(l => l.trim());
+            lastActionLogLines = lines.length;
+            lastActionLogSize = fs.statSync(ACTION_LOG_FILE).size;
+        } else {
+            lastActionLogSize = 0;
+            lastActionLogLines = 0;
         }
+    } catch {
         lastActionLogSize = 0;
         lastActionLogLines = 0;
-    } catch {
-        // ignore
     }
 
     outputChannel.appendLine('Launching AutoRun backend...');
@@ -105,11 +112,14 @@ tell application "${safeTargetApp}" to activate
             return;
         }
         isRunning = true;
+        setStartTime();
+        setBackendHealth(true);
         updateStatusBar(config, true);
         outputChannel.appendLine('Backend running in background. Log: /tmp/kiro-autorun.log');
 
         // Start polling the action log file
         startActionLogWatcher();
+        startHealthCheck();
     });
 }
 
@@ -118,6 +128,7 @@ tell application "${safeTargetApp}" to activate
  */
 function stopBackend(): void {
     stopActionLogWatcher();
+    stopHealthCheck();
 
     if (isRunning) {
         // Kill the python process — use -f (contains match, actual binary is Python not python3)
@@ -126,6 +137,7 @@ function stopBackend(): void {
         });
         isRunning = false;
     }
+    setBackendHealth(true); // Reset health state
     updateStatusBar(getConfig(), false);
 }
 
@@ -148,6 +160,55 @@ function stopActionLogWatcher(): void {
     if (actionLogWatcher) {
         clearInterval(actionLogWatcher);
         actionLogWatcher = undefined;
+    }
+}
+
+const BACKEND_LOG = '/tmp/kiro-autorun.log';
+const HEALTH_TIMEOUT_MS = 60_000; // 60s without log update = backend lost
+
+/**
+ * Start backend health monitoring
+ */
+function startHealthCheck(): void {
+    stopHealthCheck();
+    healthCheckInterval = setInterval(() => {
+        if (!isRunning) { return; }
+        try {
+            if (fs.existsSync(BACKEND_LOG)) {
+                const stat = fs.statSync(BACKEND_LOG);
+                const age = Date.now() - stat.mtimeMs;
+                const wasHealthy = isBackendHealthy();
+                if (age > HEALTH_TIMEOUT_MS) {
+                    setBackendHealth(false);
+                    if (wasHealthy) {
+                        // Only show warning once on transition
+                        outputChannel.appendLine(`[WARN] Backend log stale for ${Math.round(age / 1000)}s — backend may have crashed`);
+                        vscode.window.showWarningMessage(
+                            'AutoRun backend lost — log not updated for 60s. Try restarting.',
+                            'Restart', 'View Log'
+                        ).then(choice => {
+                            if (choice === 'View Log') { outputChannel.show(); }
+                            if (choice === 'Restart') { vscode.commands.executeCommand('kiroAutorun.toggle'); }
+                        });
+                    }
+                } else {
+                    setBackendHealth(true);
+                }
+                updateStatusBar(getConfig(), isRunning);
+            }
+        } catch {
+            // ignore
+        }
+    }, 30_000); // Check every 30s
+}
+
+/**
+ * Stop backend health monitoring
+ */
+function stopHealthCheck(): void {
+    if (healthCheckInterval) {
+        clearInterval(healthCheckInterval);
+        healthCheckInterval = undefined;
     }
 }
 
@@ -180,6 +241,19 @@ function pollActionLog(): void {
             try {
                 const entry = JSON.parse(line);
                 const status = entry.type === 'auto-approved' ? 'auto-approved' : 'denied';
+
+                // Forward stuck detection as VS Code warning
+                if (entry.type === 'stuck') {
+                    outputChannel.appendLine(`[STUCK] ${entry.reason}`);
+                    vscode.window.showWarningMessage(
+                        `AutoRun stuck: ${entry.reason}`,
+                        'View Log'
+                    ).then(choice => {
+                        if (choice === 'View Log') { outputChannel.show(); }
+                    });
+                    continue;
+                }
+
                 addEntry(entry.command || 'unknown', entry.reason || '', status);
 
                 if (status === 'auto-approved') {

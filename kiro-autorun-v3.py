@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Kiro AutoRun v2.1.0 - OCR + CGEvent Click
+Kiro AutoRun v2.1.2 - OCR + CGEvent Click
 Auto-approves Kiro IDE command prompts WITHOUT moving the cursor.
 
 Architecture:
@@ -12,7 +12,7 @@ Architecture:
 User can work on other apps normally while Kiro auto-approves in background.
 """
 
-import subprocess, time, sys, os, json, signal, atexit, logging, hashlib
+import subprocess, time, sys, os, json, signal, atexit, logging
 
 # Hide Python  icon from Dock - must be set BEFORE importing Quartz/pyobjc
 try:
@@ -694,7 +694,7 @@ def click_at_position(x, y, kiro_pid=None, win=None):
 
 # ─── Cooldown ────────────────────────────────────────────────────────
 
-def is_in_cooldown(cmd_text):
+def is_in_cooldown():
     """Time-based only: block clicks for COOLDOWN_SECONDS after any click."""
     now = time.time()
     if now - last_click_time < COOLDOWN_SECONDS:
@@ -948,7 +948,7 @@ def monitor_cycle():
         log.info(f"   Command: {cmd_text[:120]}")
 
     # Cooldown
-    if is_in_cooldown(cmd_text):
+    if is_in_cooldown():
         return
 
     # === PRIMARY: Accessibility API (no cursor movement!) ===
@@ -1043,7 +1043,7 @@ def main():
     load_config()
 
     # Kill any existing instances (prevent zombie pile-up)
-    import signal
+    # signal already imported at module level
     my_pid = os.getpid()
     try:
         out = subprocess.check_output(['pgrep', '-f', 'kiro-autorun-v3.py'], text=True)
@@ -1058,7 +1058,7 @@ def main():
     except (subprocess.CalledProcessError, ValueError):
         pass  # No other instances
 
-    log.info("Kiro AutoRun v2.1.0 - OCR + CGEvent Click")
+    log.info("Kiro AutoRun v2.1.2 - OCR + CGEvent Click")
     log.info(f"   Works while Kiro is in background")
     log.info(f"   Does NOT move cursor")
     log.info(f"   Does NOT steal focus")

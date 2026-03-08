@@ -108,6 +108,8 @@ export function getAutoApprovedCount(): number {
   return entries.filter((e) => e.status === 'auto-approved').length;
 }
 
+let panelRefreshInterval: ReturnType<typeof setInterval> | undefined;
+
 /**
  * Show the command history webview panel
  */
@@ -130,6 +132,10 @@ export function showLogPanel(context: vscode.ExtensionContext): void {
 
   panel.onDidDispose(() => {
     panel = undefined;
+    if (panelRefreshInterval) {
+      clearInterval(panelRefreshInterval);
+      panelRefreshInterval = undefined;
+    }
   });
 
   panel.webview.onDidReceiveMessage((message) => {
@@ -144,6 +150,13 @@ export function showLogPanel(context: vscode.ExtensionContext): void {
         break;
     }
   });
+
+  // Auto-refresh while panel is visible
+  panelRefreshInterval = setInterval(() => {
+    if (panel?.visible) {
+      refreshPanel();
+    }
+  }, 5000);
 
   refreshPanel();
 }
