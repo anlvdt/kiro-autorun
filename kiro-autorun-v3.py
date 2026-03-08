@@ -650,6 +650,22 @@ def click_at_position(x, y, kiro_pid=None, win=None):
 
     prev_app = None
     try:
+        # Check if Kiro is already frontmost — skip all switching if so
+        front = AppKit.NSWorkspace.sharedWorkspace().frontmostApplication()
+        kiro_already_front = front and front.processIdentifier() == kiro_pid
+
+        if kiro_already_front:
+            # Kiro is frontmost — just click, no window switching needed
+            point = Quartz.CGPointMake(x, y)
+            evt_down = Quartz.CGEventCreateMouseEvent(
+                None, Quartz.kCGEventLeftMouseDown, point, Quartz.kCGMouseButtonLeft)
+            evt_up = Quartz.CGEventCreateMouseEvent(
+                None, Quartz.kCGEventLeftMouseUp, point, Quartz.kCGMouseButtonLeft)
+            Quartz.CGEventPost(Quartz.kCGHIDEventTap, evt_down)
+            Quartz.CGEventPost(Quartz.kCGHIDEventTap, evt_up)
+            return True
+
+        # Kiro NOT frontmost — need full window switch sequence
         # Save current cursor position
         current_pos = Quartz.NSEvent.mouseLocation()
         screen_height = Quartz.CGDisplayPixelsHigh(Quartz.CGMainDisplayID())
@@ -659,10 +675,9 @@ def click_at_position(x, y, kiro_pid=None, win=None):
         # Hide cursor to prevent visible flash
         Quartz.CGDisplayHideCursor(Quartz.CGMainDisplayID())
 
-        # Bring Kiro to front (required for CGEvent to hit Kiro, not another window)
+        # Bring Kiro to front
         if kiro_pid:
             prev_app = bring_kiro_to_front(kiro_pid)
-            time.sleep(0.05)  # Small buffer after verified activation
         
         # Click at target position
         point = Quartz.CGPointMake(x, y)
@@ -671,7 +686,6 @@ def click_at_position(x, y, kiro_pid=None, win=None):
         evt_up = Quartz.CGEventCreateMouseEvent(
             None, Quartz.kCGEventLeftMouseUp, point, Quartz.kCGMouseButtonLeft)
         Quartz.CGEventPost(Quartz.kCGHIDEventTap, evt_down)
-        time.sleep(0.03)
         Quartz.CGEventPost(Quartz.kCGHIDEventTap, evt_up)
         
         # Restore cursor position
