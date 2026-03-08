@@ -705,6 +705,9 @@ def record_click(cmd_text):
     """Record a click. Returns running total click count."""
     global last_click_cmd, last_click_time, click_count
     click_count += 1
+    import traceback
+    caller = traceback.extract_stack()[-2]
+    log.info(f"   CLICK_COUNT: {click_count} (called from {caller.filename}:{caller.lineno} {caller.name})")
     last_click_cmd = cmd_text
     last_click_time = time.time()
     return click_count
