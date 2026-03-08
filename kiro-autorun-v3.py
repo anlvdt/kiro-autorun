@@ -340,7 +340,7 @@ def ocr_window(win):
         CGRectNull,  # Capture full window bounds
         kCGWindowListOptionIncludingWindow,
         window_id,
-        kCGWindowImageBoundsIgnoreFraming
+        1  # kCGWindowImageBoundsIgnoreFraming — excludes shadow
     )
     if not image:
         return []
