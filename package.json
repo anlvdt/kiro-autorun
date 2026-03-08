@@ -56,6 +56,14 @@
       {
         "command": "kiroAutorun.showOutput",
         "title": "Kiro AutoRun: Show Output Log"
+      },
+      {
+        "command": "kiroAutorun.restart",
+        "title": "Kiro AutoRun: Restart Backend"
+      },
+      {
+        "command": "kiroAutorun.reloadWindow",
+        "title": "Kiro AutoRun: Reload Window"
       }
     ],
     "configuration": {

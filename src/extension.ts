@@ -480,6 +480,32 @@ export function activate(context: vscode.ExtensionContext): void {
         })
     );
 
+    // Restart backend (stop + start)
+    context.subscriptions.push(
+        vscode.commands.registerCommand('kiroAutorun.restart', () => {
+            outputChannel.appendLine('Restarting backend...');
+            stopBackend();
+            resetCounts();
+            // Small delay to ensure process is killed before restart
+            setTimeout(() => {
+                const cfg = getConfig();
+                if (cfg.enabled) {
+                    startBackend(context);
+                    vscode.window.showInformationMessage('AutoRun backend restarted');
+                } else {
+                    vscode.window.showInformationMessage('AutoRun is disabled. Enable it first.');
+                }
+            }, 500);
+        })
+    );
+
+    // Reload window (full VS Code reload)
+    context.subscriptions.push(
+        vscode.commands.registerCommand('kiroAutorun.reloadWindow', () => {
+            vscode.commands.executeCommand('workbench.action.reloadWindow');
+        })
+    );
+
     // Config change listener
     context.subscriptions.push(
         onConfigChange((newConfig) => {
