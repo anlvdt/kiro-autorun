@@ -174,7 +174,7 @@ log = logging.getLogger("kiro-autorun")
 
 click_count = 0
 running = True
-last_click_hash = None
+last_click_cmd = None    # Track by COMMAND text, not screen hash
 last_click_time = 0
 stuck_cycles = 0
 STUCK_THRESHOLD = 5
@@ -636,9 +636,7 @@ def restore_previous_app(prev_app):
 
 def click_at_position(x, y, kiro_pid=None, win=None):
     """Click at screen coordinates using CGEvent.
-    Only CGEvent works for Electron web-rendered buttons.
-    Brings Kiro to front briefly, clicks, then restores previous app.
-    Works across macOS Spaces (brief Space switch for full automation).
+    Cursor is hidden during the entire click sequence — invisible to user.
     """
     # Guard: verify target coordinates are inside Kiro window bounds
     if win:
@@ -649,49 +647,24 @@ def click_at_position(x, y, kiro_pid=None, win=None):
             return False
 
     prev_app = None
+    display = Quartz.CGMainDisplayID()
     try:
-        # Check if Kiro is already frontmost — skip all switching if so
-        front = AppKit.NSWorkspace.sharedWorkspace().frontmostApplication()
-        kiro_already_front = front and front.processIdentifier() == kiro_pid
-
-        if kiro_already_front:
-            # Kiro is frontmost — just click, no window switching needed
-            # Save cursor, click, restore — all instant
-            current_pos = Quartz.NSEvent.mouseLocation()
-            screen_height = Quartz.CGDisplayPixelsHigh(Quartz.CGMainDisplayID())
-            saved_x = current_pos.x
-            saved_y = screen_height - current_pos.y
-
-            point = Quartz.CGPointMake(x, y)
-            evt_down = Quartz.CGEventCreateMouseEvent(
-                None, Quartz.kCGEventLeftMouseDown, point, Quartz.kCGMouseButtonLeft)
-            evt_up = Quartz.CGEventCreateMouseEvent(
-                None, Quartz.kCGEventLeftMouseUp, point, Quartz.kCGMouseButtonLeft)
-            Quartz.CGEventPost(Quartz.kCGHIDEventTap, evt_down)
-            Quartz.CGEventPost(Quartz.kCGHIDEventTap, evt_up)
-
-            # Restore cursor immediately
-            restore_point = Quartz.CGPointMake(saved_x, saved_y)
-            restore_evt = Quartz.CGEventCreateMouseEvent(
-                None, Quartz.kCGEventMouseMoved, restore_point, Quartz.kCGMouseButtonLeft)
-            Quartz.CGEventPost(Quartz.kCGHIDEventTap, restore_evt)
-            return True
-
-        # Kiro NOT frontmost — need full window switch sequence
-        # Save current cursor position
+        # Save cursor position
         current_pos = Quartz.NSEvent.mouseLocation()
-        screen_height = Quartz.CGDisplayPixelsHigh(Quartz.CGMainDisplayID())
+        screen_height = Quartz.CGDisplayPixelsHigh(display)
         saved_x = current_pos.x
         saved_y = screen_height - current_pos.y
 
-        # Hide cursor to prevent visible flash
-        Quartz.CGDisplayHideCursor(Quartz.CGMainDisplayID())
+        # HIDE cursor BEFORE any movement — makes everything invisible
+        Quartz.CGDisplayHideCursor(display)
 
-        # Bring Kiro to front
+        # Bring Kiro to front if not already frontmost
         if kiro_pid:
-            prev_app = bring_kiro_to_front(kiro_pid)
-        
-        # Click at target position
+            front = AppKit.NSWorkspace.sharedWorkspace().frontmostApplication()
+            if not (front and front.processIdentifier() == kiro_pid):
+                prev_app = bring_kiro_to_front(kiro_pid)
+
+        # Click at target (cursor moves but is hidden)
         point = Quartz.CGPointMake(x, y)
         evt_down = Quartz.CGEventCreateMouseEvent(
             None, Quartz.kCGEventLeftMouseDown, point, Quartz.kCGMouseButtonLeft)
@@ -699,43 +672,46 @@ def click_at_position(x, y, kiro_pid=None, win=None):
             None, Quartz.kCGEventLeftMouseUp, point, Quartz.kCGMouseButtonLeft)
         Quartz.CGEventPost(Quartz.kCGHIDEventTap, evt_down)
         Quartz.CGEventPost(Quartz.kCGHIDEventTap, evt_up)
-        
-        # Restore cursor position
-        time.sleep(0.01)
+
+        # Restore cursor position (still hidden)
         restore_point = Quartz.CGPointMake(saved_x, saved_y)
         restore_evt = Quartz.CGEventCreateMouseEvent(
             None, Quartz.kCGEventMouseMoved, restore_point, Quartz.kCGMouseButtonLeft)
         Quartz.CGEventPost(Quartz.kCGHIDEventTap, restore_evt)
-        
+
+        # Small delay to ensure restore event is processed before showing cursor
+        time.sleep(0.02)
+
         return True
     except Exception as e:
         log.warning(f"CGEvent click error: {e}")
         return False
     finally:
-        # Always show cursor and restore previous app
-        Quartz.CGDisplayShowCursor(Quartz.CGMainDisplayID())
+        # ALWAYS show cursor and restore previous app
+        Quartz.CGDisplayShowCursor(display)
         if prev_app:
             time.sleep(0.05)
             restore_previous_app(prev_app)
 
 # ─── Cooldown ────────────────────────────────────────────────────────
 
-def compute_screen_hash(ocr_results):
-    text = " ".join(r["text"] for r in ocr_results)[:500]
-    return hashlib.md5(text.encode()).hexdigest()[:12]
-
-def is_in_cooldown(screen_hash):
-    global last_click_hash, last_click_time
+def is_in_cooldown(cmd_text):
+    """Check if we recently clicked for this same command."""
+    global last_click_cmd, last_click_time
     now = time.time()
+    # Block ALL clicks for CLICK_DEBOUNCE_SECONDS after any click
     if now - last_click_time < CLICK_DEBOUNCE_SECONDS:
         return True
-    if screen_hash == last_click_hash and now - last_click_time < COOLDOWN_SECONDS:
+    # Block same command for COOLDOWN_SECONDS
+    if cmd_text and cmd_text == last_click_cmd and now - last_click_time < COOLDOWN_SECONDS:
         return True
     return False
 
-def record_click(screen_hash):
-    global last_click_hash, last_click_time
-    last_click_hash = screen_hash
+def record_click(cmd_text):
+    global last_click_cmd, last_click_time, click_count
+    if cmd_text != last_click_cmd:
+        click_count = 0  # New command — reset counter
+    last_click_cmd = cmd_text
     last_click_time = time.time()
 
 # ─── Notification ────────────────────────────────────────────────────
@@ -977,8 +953,7 @@ def monitor_cycle():
         log.info(f"   Command: {cmd_text[:120]}")
 
     # Cooldown
-    screen_hash = compute_screen_hash(ocr_results)
-    if is_in_cooldown(screen_hash):
+    if is_in_cooldown(cmd_text):
         return
 
     # === PRIMARY: Accessibility API (no cursor movement!) ===
@@ -990,7 +965,7 @@ def monitor_cycle():
         log.info(f"BLOCKED - {safety_reason}")
         send_notification(f"Blocked: {safety_reason}", play_sound=True)
         log_action("denied", cmd_text or trigger_label, safety_reason)
-        record_click(screen_hash)
+        record_click(cmd_text)
         stuck_cycles = 0
         return
 
@@ -1036,7 +1011,7 @@ def monitor_cycle():
             send_notification(f"Auto-approved '{btn_title}' (#{click_count})")
             log_action("auto-approved", cmd_text or btn_title,
                       f"Trigger: {trigger_label} [AX API]", learn_pattern)
-            record_click(screen_hash)
+            record_click(cmd_text)
             stuck_cycles = 0
             time.sleep(4)  # Wait for Kiro UI to fully update
             return
@@ -1052,7 +1027,7 @@ def monitor_cycle():
                 send_notification(f"Auto-approved '{btn_text}' (#{click_count})")
                 log_action("auto-approved", cmd_text or btn_text,
                           f"Trigger: {trigger_label} [OCR-click]", learn_pattern)
-                record_click(screen_hash)
+                record_click(cmd_text)
                 stuck_cycles = 0
                 time.sleep(4)  # Wait for Kiro UI to fully update
                 return
