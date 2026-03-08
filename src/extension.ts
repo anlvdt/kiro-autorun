@@ -87,15 +87,23 @@ function startBackend(context: vscode.ExtensionContext): void {
     const script = `
 tell application "Terminal"
   do script "${shellCmd.replace(/"/g, '\\"')}"
-  -- Minimize the new window immediately to reduce flash
+  set launchWin to front window
+  -- Minimize immediately to reduce flash
   try
-    set miniaturized of front window to true
+    set miniaturized of launchWin to true
   end try
 end tell
-delay 0.5
-tell application "System Events"
-  set visible of process "Terminal" to false
-end tell
+delay 1
+-- Close the Terminal window (shell already exited)
+try
+  tell application "Terminal"
+    close launchWin
+    -- Quit Terminal if no windows left
+    if (count of windows) = 0 then
+      quit
+    end if
+  end tell
+end try
 tell application "${safeTargetApp}" to activate
 `.trim();
 
