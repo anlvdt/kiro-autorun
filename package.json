@@ -2,7 +2,7 @@
   "name": "kiro-autorun",
   "displayName": "Kiro AutoRun",
   "description": "Auto-clicks Run/Accept All for Kiro IDE prompts with banned-keyword safety",
-  "version": "2.1.2",
+  "version": "2.1.3",
   "publisher": "ANLE",
   "icon": "icon.png",
   "repository": {

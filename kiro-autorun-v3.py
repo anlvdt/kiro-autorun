@@ -906,33 +906,45 @@ def monitor_cycle():
         stuck_cycles = 0
         return
 
-    # Check for trigger text
+    # Check for trigger text - must be a STANDALONE OCR text block
+    # (not part of a longer paragraph like in README/Settings)
     all_text_lower = " ".join(r["text"].lower() for r in ocr_results)
     matched_trigger = None
+    trigger_y = None
     for trigger in TRIGGER_TEXTS:
-        if trigger in all_text_lower:
-            matched_trigger = trigger
+        for r in ocr_results:
+            text = r["text"].lower().strip()
+            # Trigger must be the dominant text in this OCR block (not a substring in a paragraph)
+            # Real dialog: OCR block IS the trigger text or very close to it
+            if trigger in text and len(text) < len(trigger) + 20:
+                matched_trigger = trigger
+                trigger_y = r["y"]
+                break
+        if matched_trigger:
             break
 
     # Also check for accept all / reject all (Kiro v0.8+)
     has_accept_all = "accept all" in all_text_lower and "reject all" in all_text_lower
 
-    # OCR visual verification: require dialog buttons on screen
-    # This prevents false triggers from Output panel showing our own log text
-    ocr_sees_dialog_buttons = any(
-        btn in all_text_lower for btn in ["reject", "trust"]
-    )
-    # Only confirm dialog when BOTH trigger text AND dialog buttons are visible
-    # This prevents Output panel text like "Detected: 'waiting on your input'" from triggering
+    # OCR visual verification: require "reject" as STANDALONE button text
+    # (not substring in paragraph like 'Accept All / Reject All prompts...')
+    # Real button: OCR text is exactly "Reject" or "reject" (short, standalone)
+    ocr_sees_dialog_buttons = False
+    for r in ocr_results:
+        text = r["text"].strip().lower()
+        if text in ("reject", "reject all", "trust") and len(text) <= 12:
+            ocr_sees_dialog_buttons = True
+            break
+
+    # Only confirm dialog when BOTH trigger AND standalone dialog buttons are visible
     ocr_confirmed_dialog = bool(matched_trigger) and ocr_sees_dialog_buttons
 
     if not matched_trigger and not has_accept_all:
         stuck_cycles = 0
         return
 
-    # If trigger found but no dialog buttons visible, likely Output panel false positive
+    # If trigger found but no dialog buttons visible, likely Settings/README/Output panel
     if matched_trigger and not ocr_sees_dialog_buttons and not has_accept_all:
-        # Don't count as stuck - this is just Output panel noise
         return
 
     trigger_label = matched_trigger or "Accept All/Reject All"
