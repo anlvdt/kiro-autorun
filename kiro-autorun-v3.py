@@ -917,18 +917,22 @@ def monitor_cycle():
     # Also check for accept all / reject all (Kiro v0.8+)
     has_accept_all = "accept all" in all_text_lower and "reject all" in all_text_lower
 
-    # OCR visual verification: check that we see dialog buttons on screen
-    # This prevents clicking sidebar "Run" when there's no actual command dialog
-    # Includes Play icon variants (▶, ►) that OCR may detect
+    # OCR visual verification: require dialog buttons on screen
+    # This prevents false triggers from Output panel showing our own log text
     ocr_sees_dialog_buttons = any(
-        btn in all_text_lower for btn in ["reject", "trust", "▶", "►", "play"]
+        btn in all_text_lower for btn in ["reject", "trust"]
     )
-    # "Waiting on your input" = confirmed dialog. Position filtering in AX API
-    # handles sidebar false positives, so trigger text alone is sufficient.
-    ocr_confirmed_dialog = bool(matched_trigger)
+    # Only confirm dialog when BOTH trigger text AND dialog buttons are visible
+    # This prevents Output panel text like "Detected: 'waiting on your input'" from triggering
+    ocr_confirmed_dialog = bool(matched_trigger) and ocr_sees_dialog_buttons
 
     if not matched_trigger and not has_accept_all:
         stuck_cycles = 0
+        return
+
+    # If trigger found but no dialog buttons visible, likely Output panel false positive
+    if matched_trigger and not ocr_sees_dialog_buttons and not has_accept_all:
+        # Don't count as stuck - this is just Output panel noise
         return
 
     trigger_label = matched_trigger or "Accept All/Reject All"
