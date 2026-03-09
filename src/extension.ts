@@ -78,61 +78,36 @@ function startBackend(context: vscode.ExtensionContext): void {
     outputChannel.appendLine('Launching AutoRun backend...');
     outputChannel.appendLine(`   Script: ${scriptPath}`);
 
-    // Strategy: Open Terminal.app (has Screen Recording permission),
-    // run script with nohup in background, exit shell to auto-close window,
-    // then bring Kiro back to focus. Python keeps running with Terminal's permissions.
-    const escaped = scriptPath.replace(/'/g, "'\"'\"'");
-    const shellCmd = `defaults write org.python.python LSUIElement -bool true 2>/dev/null; nohup python3 '${escaped}' > /tmp/kiro-autorun.log 2>&1 & disown; sleep 0.3 && exit`;
+    // Set LSUIElement to hide Python Dock icon
+    exec('defaults write org.python.python LSUIElement -bool true 2>/dev/null');
 
-    const script = `
-tell application "Terminal"
-  do script "${shellCmd.replace(/"/g, '\\"')}"
-  set launchWin to front window
-  -- Minimize immediately to reduce flash
-  try
-    set miniaturized of launchWin to true
-  end try
-end tell
-delay 1
--- Close the Terminal window (shell already exited)
-try
-  tell application "Terminal"
-    close launchWin
-    -- Quit Terminal if no windows left
-    if (count of windows) = 0 then
-      quit
-    end if
-  end tell
-end try
-tell application "${safeTargetApp}" to activate
-`.trim();
+    // Strategy: Launch Python directly via child_process.spawn (detached)
+    // No Terminal.app needed — avoids "terminate processes" dialog
+    const logFd = fs.openSync('/tmp/kiro-autorun.log', 'w');
+    const child = require('child_process').spawn('python3', [scriptPath], {
+        detached: true,
+        stdio: ['ignore', logFd, logFd],
+        env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1' },
+    });
 
-    // FIX #2: Use random temp filename to prevent TOCTOU race condition
-    const tmpScript = path.join('/tmp', `kiro-autorun-${crypto.randomBytes(8).toString('hex')}.scpt`);
-    fs.writeFileSync(tmpScript, script, { encoding: 'utf-8', mode: 0o600 });
+    child.unref(); // Allow Kiro to exit without waiting for Python
+    fs.closeSync(logFd); // Close our fd — child has its own
 
-    exec(`osascript ${tmpScript}`, (err) => {
-        // Clean up temp script immediately after execution
-        try { fs.unlinkSync(tmpScript); } catch { /* ignore */ }
-
-        if (err) {
-            outputChannel.appendLine(`Launch error: ${err.message}`);
-            vscode.window.showErrorMessage(
-                'AutoRun: Could not start. Make sure Terminal.app has Accessibility permission.',
-                'Show Log'
-            ).then((s) => { if (s) { outputChannel.show(); } });
-            return;
-        }
+    if (child.pid) {
         isRunning = true;
         setStartTime();
         setBackendHealth(true);
         updateStatusBar(config, true);
-        outputChannel.appendLine('Backend running in background. Log: /tmp/kiro-autorun.log');
-
-        // Start polling the action log file
+        outputChannel.appendLine(`Backend running (PID: ${child.pid}). Log: /tmp/kiro-autorun.log`);
         startActionLogWatcher();
         startHealthCheck();
-    });
+    } else {
+        outputChannel.appendLine('[ERROR] Failed to spawn Python backend');
+        vscode.window.showErrorMessage(
+            'AutoRun: Could not start backend. Check Python3 is installed.',
+            'Show Log'
+        ).then((s) => { if (s) { outputChannel.show(); } });
+    }
 }
 
 /**
