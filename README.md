@@ -110,23 +110,6 @@ npm run package
 
 Default banned keywords include: `rm -rf`, `sudo rm`, `chmod 777`, `curl | sh`, `git push --force`, `git reset --hard`, `drop table`, `shutdown`, `kill -9`, `killall`, fork bomb, reverse shells, credential access, and more.
 
-## Changelog
-
-### v2.1.0
-- Removed all emojis from UI and logs - clean text output
-- Added CGEvent click guard (bounds check before click)
-- Added auto-restart prompt after version update
-- Hidden Python Dock icon (LSUIElement)
-- Removed dead code (AppleScript fallback)
-- Smart command extraction (last Command block, not first)
-
-### v2.0.0
-- Hybrid 2-layer architecture (Settings API + OCR)
-- OCR-position button clicking (replaces AX API for web-rendered buttons)
-- CGEvent click with cursor save/restore
-- Smart command safety analysis with NEVER_LEARN list
-- Process deduplication at startup
-
 ## Author
 
 **Le Van An** (Vietnam IT)
