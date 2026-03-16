@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as crypto from 'crypto';
-import { exec } from 'child_process';
+import { exec, spawn } from 'child_process';
 import { getConfig, setConfigValue, writeConfigFile, onConfigChange, ACTION_LOG_FILE } from './config';
 import {
     createStatusBar, updateStatusBar, disposeStatusBar,
@@ -15,6 +15,7 @@ import { applyKiroSettings, setFullAutonomy, addTrustedPattern } from './kiroSet
 let outputChannel: vscode.OutputChannel;
 let isRunning = false;
 let actionLogWatcher: ReturnType<typeof setInterval> | undefined;
+let actionLogFsWatcher: fs.FSWatcher | undefined;
 let lastActionLogSize = 0;
 let lastActionLogLines = 0;
 let healthCheckInterval: ReturnType<typeof setInterval> | undefined;
@@ -83,15 +84,19 @@ function startBackend(context: vscode.ExtensionContext): void {
 
     // Strategy: Launch Python directly via child_process.spawn (detached)
     // No Terminal.app needed — avoids "terminate processes" dialog
-    const logFd = fs.openSync('/tmp/kiro-autorun.log', 'w');
-    const child = require('child_process').spawn('python3', [scriptPath], {
-        detached: true,
-        stdio: ['ignore', logFd, logFd],
-        env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1' },
-    });
+    const logFd = fs.openSync('/tmp/kiro-autorun.log', 'a'); // 'a' = append — preserve history, don't reset mtime on start
+    let child: ReturnType<typeof spawn>;
+    try {
+        child = spawn('python3', [scriptPath], {
+            detached: true,
+            stdio: ['ignore', logFd, logFd],
+            env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1' },
+        });
+    } finally {
+        fs.closeSync(logFd); // Close our fd — child has its own copy
+    }
 
     child.unref(); // Allow Kiro to exit without waiting for Python
-    fs.closeSync(logFd); // Close our fd — child has its own
 
     if (child.pid) {
         isRunning = true;
@@ -100,7 +105,7 @@ function startBackend(context: vscode.ExtensionContext): void {
         updateStatusBar(config, true);
         outputChannel.appendLine(`Backend running (PID: ${child.pid}). Log: /tmp/kiro-autorun.log`);
         startActionLogWatcher();
-        startHealthCheck();
+        startHealthCheck(context);
     } else {
         outputChannel.appendLine('[ERROR] Failed to spawn Python backend');
         vscode.window.showErrorMessage(
@@ -124,26 +129,52 @@ function stopBackend(): void {
         });
         isRunning = false;
     }
-    setBackendHealth(true); // Reset health state
+    setBackendHealth(false); // Mark as not healthy when stopped
     updateStatusBar(getConfig(), false);
 }
 
 /**
- * Start watching the action log file for new entries from Python backend
+ * Start watching the action log file for new entries from Python backend.
+ * Primary: fs.watch (instant notification on file change, 0s delay).
+ * Fallback: setInterval every 10s (safety net if fs.watch unavailable).
  */
 function startActionLogWatcher(): void {
     stopActionLogWatcher();
 
-    // Poll every 2 seconds for new action log entries
+    const watchTarget = ACTION_LOG_FILE;
+
+    // Primary: fs.watch — notified immediately when Python writes a new entry
+    try {
+        // Ensure file exists so fs.watch has something to watch
+        if (!fs.existsSync(watchTarget)) {
+            const dir = path.dirname(watchTarget);
+            if (!fs.existsSync(dir)) { fs.mkdirSync(dir, { recursive: true }); }
+            fs.writeFileSync(watchTarget, '', 'utf-8');
+        }
+        actionLogFsWatcher = fs.watch(watchTarget, () => {
+            pollActionLog();
+        });
+        actionLogFsWatcher.on('error', () => {
+            // fs.watch failed — fall through to setInterval fallback
+        });
+    } catch {
+        // fs.watch may not be available (network drives etc.)
+    }
+
+    // Fallback: slow poll every 10s as a safety net
     actionLogWatcher = setInterval(() => {
         pollActionLog();
-    }, 2000);
+    }, 10_000);
 }
 
 /**
  * Stop watching the action log file
  */
 function stopActionLogWatcher(): void {
+    if (actionLogFsWatcher) {
+        actionLogFsWatcher.close();
+        actionLogFsWatcher = undefined;
+    }
     if (actionLogWatcher) {
         clearInterval(actionLogWatcher);
         actionLogWatcher = undefined;
@@ -151,12 +182,13 @@ function stopActionLogWatcher(): void {
 }
 
 const BACKEND_LOG = '/tmp/kiro-autorun.log';
-const HEALTH_TIMEOUT_MS = 60_000; // 60s without log update = backend lost
+const HEALTH_TIMEOUT_MS = 300_000; // 300s (5 min) without log update = backend lost
+                                    // Python only logs when Kiro shows a prompt, so 60s was far too short
 
 /**
  * Start backend health monitoring
  */
-function startHealthCheck(): void {
+function startHealthCheck(context: vscode.ExtensionContext): void {
     stopHealthCheck();
     healthCheckInterval = setInterval(() => {
         if (!isRunning) { return; }
@@ -166,22 +198,28 @@ function startHealthCheck(): void {
                 const age = Date.now() - stat.mtimeMs;
                 const wasHealthy = isBackendHealthy();
                 if (age > HEALTH_TIMEOUT_MS) {
-                    setBackendHealth(false);
-                    if (wasHealthy) {
-                        // Only show warning once on transition
-                        outputChannel.appendLine(`[WARN] Backend log stale for ${Math.round(age / 1000)}s — backend may have crashed`);
-                        vscode.window.showWarningMessage(
-                            'AutoRun backend lost — log not updated for 60s. Try restarting.',
-                            'Restart', 'View Log'
-                        ).then(choice => {
-                            if (choice === 'View Log') { outputChannel.show(); }
-                            if (choice === 'Restart') { vscode.commands.executeCommand('kiroAutorun.toggle'); }
-                        });
-                    }
+                    // Log is stale — verify the Python process is actually dead
+                    exec('pgrep -f kiro-autorun-v3.py', (err, stdout) => {
+                        const processAlive = !err && stdout.trim().length > 0;
+                        if (processAlive) {
+                            // Process alive but no recent log — just idle (no Kiro prompts)
+                            // Reset the baseline so we don't keep re-checking
+                            setBackendHealth(true);
+                        } else {
+                            // Process is truly dead → auto-restart
+                            setBackendHealth(false);
+                            if (wasHealthy) {
+                                outputChannel.appendLine(`[WARN] Backend process died (log stale ${Math.round(age / 1000)}s) — auto-restarting...`);
+                            }
+                            isRunning = false; // Allow startBackend to run
+                            startBackend(context);
+                        }
+                        updateStatusBar(getConfig(), isRunning);
+                    });
                 } else {
                     setBackendHealth(true);
+                    updateStatusBar(getConfig(), isRunning);
                 }
-                updateStatusBar(getConfig(), isRunning);
             }
         } catch {
             // ignore
@@ -252,8 +290,13 @@ function pollActionLog(): void {
                 updateStatusBar(getConfig(), isRunning);
                 outputChannel.appendLine(`${status === 'auto-approved' ? '[OK]' : '[BLOCKED]'} ${entry.command} — ${entry.reason}`);
 
-                // Auto-learn: if Python detected a safe pattern, add to Kiro trustedCommands
+                // Auto-learn: if Python signals a safe pattern, add to Kiro trustedCommands
                 if (entry.learn && status === 'auto-approved') {
+                    learnTrustedPattern(entry.learn);
+                }
+                // Auto-trust: frequency threshold reached — add immediately without waiting
+                if (entry.auto_trust && entry.learn && status === 'auto-approved') {
+                    outputChannel.appendLine(`[LEARN] Auto-trust threshold reached for "${entry.learn}" — adding to Kiro trustedCommands`);
                     learnTrustedPattern(entry.learn);
                 }
             } catch {
@@ -266,29 +309,32 @@ function pollActionLog(): void {
 }
 
 /**
+ * Commands that should never be auto-learned as trusted patterns.
+ * Mirrors Python backend's NEVER_LEARN set — keep in sync.
+ */
+const NEVER_LEARN = new Set([
+    'rm', 'rmdir', 'chmod', 'chown', 'chgrp',
+    'curl', 'wget', 'git', 'kill', 'pkill',
+    'dd', 'mkfs', 'fdisk', 'sudo',
+    'ssh', 'scp', 'rsync',
+    'docker', 'kubectl',
+    'pip', 'pip3', 'npm', 'npx',
+    'eval', 'exec', 'source', '.', // '.' is shell source alias
+]);
+
+/**
  * Auto-learn: add a new trusted pattern to Kiro's settings.
  * Called when Python backend identifies a safe command not yet in trusted list.
- * 
- * FIX #5 + #6: Validates pattern to prevent log injection attacks
- * and mirrors Python's NEVER_LEARN safety check.
+ * Validates pattern to prevent log injection attacks and mirrors Python's NEVER_LEARN.
  */
 async function learnTrustedPattern(pattern: string): Promise<void> {
-    // === FIX #5: Reject obviously malicious patterns ===
+    // Reject obviously malicious patterns
     if (!pattern || pattern.length > 50) { return; }          // Too long = suspicious
     if (pattern === '*') { return; }                           // Never trust ALL
     if (!pattern.includes(' ')) { return; }                    // Must be "command *" format
     if (/[;&|`$]/.test(pattern)) { return; }                   // No chain operators
 
-    // === FIX #6: Mirror Python's NEVER_LEARN set ===
-    const NEVER_LEARN = new Set([
-        'rm', 'rmdir', 'chmod', 'chown', 'chgrp',
-        'curl', 'wget', 'git', 'kill', 'pkill',
-        'dd', 'mkfs', 'fdisk', 'sudo',
-        'ssh', 'scp', 'rsync',
-        'docker', 'kubectl',
-        'pip', 'pip3', 'npm', 'npx',
-        'eval', 'exec', 'source',
-    ]);
+    // Mirror Python's NEVER_LEARN set
     const baseCmd = pattern.split(' ')[0].toLowerCase();
     if (NEVER_LEARN.has(baseCmd)) {
         outputChannel.appendLine(`Refused to learn "${pattern}" — base command "${baseCmd}" is in NEVER_LEARN`);
@@ -393,7 +439,7 @@ export function activate(context: vscode.ExtensionContext): void {
             });
             if (pattern?.trim()) {
                 const p = pattern.trim();
-                // FIX #6: Validate — same rules as learnTrustedPattern
+                // Validate — same rules as learnTrustedPattern, using shared NEVER_LEARN
                 if (p === '*') {
                     vscode.window.showErrorMessage('Cannot trust "*" — use Full Autonomy command instead.');
                     return;
@@ -402,9 +448,8 @@ export function activate(context: vscode.ExtensionContext): void {
                     vscode.window.showErrorMessage('Pattern contains dangerous characters.');
                     return;
                 }
-                const NEVER_TRUST = new Set(['rm', 'chmod', 'chown', 'curl', 'wget', 'git', 'kill', 'dd', 'mkfs', 'sudo', 'ssh', 'docker', 'kubectl', 'npm', 'npx', 'pip', 'eval', 'exec']);
                 const baseCmd = p.split(' ')[0].toLowerCase();
-                if (NEVER_TRUST.has(baseCmd)) {
+                if (NEVER_LEARN.has(baseCmd)) {
                     vscode.window.showWarningMessage(`"${baseCmd}" has dangerous variants — cannot be trusted as wildcard. Add specific safe patterns instead.`);
                     return;
                 }

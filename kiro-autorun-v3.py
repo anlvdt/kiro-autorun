@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Kiro AutoRun v2.1.2 - OCR + CGEvent Click
+Kiro AutoRun v2.1.4 - OCR + CGEvent Click
 Auto-approves Kiro IDE command prompts WITHOUT moving the cursor.
 
 Architecture:
@@ -12,7 +12,7 @@ Architecture:
 User can work on other apps normally while Kiro auto-approves in background.
 """
 
-import subprocess, time, sys, os, json, signal, atexit, logging
+import subprocess, time, sys, os, json, signal, atexit, logging, re, unicodedata, tempfile, hashlib
 
 # Hide Python  icon from Dock - must be set BEFORE importing Quartz/pyobjc
 try:
@@ -70,11 +70,20 @@ STUCK_RECOVERY_ENABLED = True
 CLICKABLE_BUTTONS = ["Accept All", "Reject All"]
 # OCR-based dialog button detection (order = priority: Run first!)
 # Includes Play icon variants that OCR may read as unicode symbols
-DIALOG_BUTTON_TEXTS = ["run", "trust", "▶", "►", "play"]  # Include Play icon variants
+DIALOG_BUTTON_TEXTS = ["run", "trust", "▶", "►", "▷", "play", "⏵"]  # Include Play icon variants
 # Buttons we actually want to press
 PRESSABLE_BUTTONS = {"accept all", "trust", "run", "play"}
 
 COOLDOWN_SECONDS = 5          # Block clicks for 5s after any click (4s sleep + 2s poll = 6s cycle)
+
+# ─── Adaptive poll rates ─────────────────────────────────────────────
+POLL_SLOW   = 5.0   # No Kiro window found — conserve CPU
+POLL_NORMAL = 2.0   # Kiro visible, no trigger yet — default cadence
+POLL_FAST   = 0.8   # Trigger detected — respond quickly
+
+# ─── Learned commands persistent file ────────────────────────────────
+LEARNED_FILE = os.path.expanduser("~/.kiro-autorun/learned.json")
+AUTO_TRUST_THRESHOLD = 5     # Approve N times → signal TypeScript to auto-trust
 
 BANNED_KEYWORDS = [
     # ── Filesystem destruction ──
@@ -178,6 +187,17 @@ last_click_time = 0
 stuck_cycles = 0
 STUCK_THRESHOLD = 5
 
+# ─── Performance: image change detection ─────────────────────────────
+_last_img_hash: str | None = None   # MD5 of last captured image bytes
+_last_img_had_trigger = False        # Was trigger visible in last OCR?
+
+# ─── Self-learning: approval frequency counter ────────────────────────
+try:
+    from collections import Counter
+    _approval_freq: Counter = Counter()
+except ImportError:
+    _approval_freq = {}
+
 # ─── Config ──────────────────────────────────────────────────────────
 
 def load_config():
@@ -187,7 +207,7 @@ def load_config():
     if not os.path.exists(CONFIG_FILE):
         return
     try:
-        # FIX #3: Check config file permissions
+        # Check config file permissions
         file_stat = os.stat(CONFIG_FILE)
         file_mode = oct(file_stat.st_mode)[-3:]
         if file_mode[-1] not in ('0', '4'):
@@ -205,9 +225,8 @@ def load_config():
         SHOW_NOTIFICATION = cfg.get("showNotification", SHOW_NOTIFICATION)
         NOTIFICATION_SOUND = cfg.get("notificationSound", NOTIFICATION_SOUND)
         STUCK_RECOVERY_ENABLED = cfg.get("stuckRecoveryEnabled", STUCK_RECOVERY_ENABLED)
-        # FIX #1: Sanitize targetApp
+        # Sanitize targetApp to prevent injection
         raw_app = cfg.get("targetApp", TARGET_APP)
-        import re
         safe_app = re.sub(r'[^a-zA-Z0-9 .\-]', '', raw_app)
         if safe_app != raw_app:
             log.warning(f"SECURITY: targetApp sanitized: '{raw_app}' -> '{safe_app}'")
@@ -231,9 +250,37 @@ def load_config():
     except (json.JSONDecodeError, OSError) as e:
         log.warning(f"Config load error: {e}")
 
+# ─── Learned Commands: cross-session persistence ─────────────────────
+
+def load_learned() -> None:
+    """Load persisted approval frequency counts from learned.json."""
+    global _approval_freq
+    if not os.path.exists(LEARNED_FILE):
+        return
+    try:
+        with open(LEARNED_FILE) as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            from collections import Counter
+            _approval_freq = Counter(data)
+            log.info(f"   Loaded {len(_approval_freq)} learned patterns from {LEARNED_FILE}")
+    except (json.JSONDecodeError, OSError) as e:
+        log.warning(f"learned.json load error: {e}")
+
+def save_learned() -> None:
+    """Persist approval frequency counts to learned.json."""
+    try:
+        learned_dir = os.path.dirname(LEARNED_FILE)
+        if not os.path.exists(learned_dir):
+            os.makedirs(learned_dir, exist_ok=True)
+        with open(LEARNED_FILE, "w") as f:
+            json.dump(dict(_approval_freq), f, indent=2)
+    except OSError as e:
+        log.warning(f"learned.json save error: {e}")
+
 # ─── Action Log ──────────────────────────────────────────────────────
 
-def log_action(action_type, command, reason, learn_pattern=None):
+def log_action(action_type, command, reason, learn_pattern=None, auto_trust=False):
     entry = {
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "type": action_type,
@@ -242,20 +289,24 @@ def log_action(action_type, command, reason, learn_pattern=None):
     }
     if learn_pattern:
         entry["learn"] = learn_pattern
+    if auto_trust and learn_pattern:
+        entry["auto_trust"] = True   # Signal TypeScript to add to trustedCommands immediately
     try:
         log_dir = os.path.dirname(ACTION_LOG_FILE)
         if not os.path.exists(log_dir):
             os.makedirs(log_dir, exist_ok=True)
         with open(ACTION_LOG_FILE, "a") as f:
             f.write(json.dumps(entry) + "\n")
-        # FIX #7: Log rotation - keep last 500 lines if over 1000
+        # Log rotation — keep last 500 lines when over 1000
+        # Read once, write once (single open to minimize TOCTOU window)
         try:
             with open(ACTION_LOG_FILE, "r") as f:
                 lines = f.readlines()
             if len(lines) > 1000:
+                kept = lines[-500:]
                 with open(ACTION_LOG_FILE, "w") as f:
-                    f.writelines(lines[-500:])
-                log.info(f"Action log rotated: {len(lines)} -> 500 lines")
+                    f.writelines(kept)
+                log.info(f"Action log rotated: {len(lines)} -> {len(kept)} lines")
         except OSError:
             pass
     except OSError as e:
@@ -264,16 +315,20 @@ def log_action(action_type, command, reason, learn_pattern=None):
 # ─── Signal Handling ─────────────────────────────────────────────────
 
 def cleanup():
-    for path in ["/tmp/kiro-autorun-launch.scpt"]:
-        try:
-            if os.path.exists(path):
-                os.remove(path)
-        except OSError:
-            pass
+    _path = "/tmp/kiro-autorun-launch.scpt"
+    try:
+        if os.path.exists(_path):
+            os.remove(_path)
+    except OSError:
+        pass
 
 def signal_handler(signum, frame):
     global running
-    log.info(f"Received {signal.Signals(signum).name}, shutting down...")
+    try:
+        sig_name = signal.Signals(signum).name
+    except ValueError:
+        sig_name = str(signum)
+    log.info(f"Received {sig_name}, shutting down...")
     running = False
 
 signal.signal(signal.SIGTERM, signal_handler)
@@ -324,32 +379,140 @@ def find_kiro_window():
 # "Waiting on your input" and buttons are always at the bottom
 OCR_CROP_TOP = 0.4  # Skip top 40%, only OCR bottom 60%
 
+def _load_cgimage_from_file(path):
+    """Load a PNG/JPEG file as a CGImage for Vision OCR."""
+    try:
+        from Quartz import CGImageSourceCreateWithURL, CGImageSourceCreateImageAtIndex
+        from CoreFoundation import CFURLCreateWithFileSystemPath, kCFAllocatorDefault, kCFURLPOSIXPathStyle
+        url = CFURLCreateWithFileSystemPath(kCFAllocatorDefault, path, kCFURLPOSIXPathStyle, False)
+        src = CGImageSourceCreateWithURL(url, None)
+        if src:
+            return CGImageSourceCreateImageAtIndex(src, 0, None)
+    except Exception as e:
+        log.warning(f"_load_cgimage_from_file error: {e}")
+    return None
+
+
+def _screencapture_fallback(window_id):
+    """Fallback: use macOS screencapture CLI to capture a window by ID.
+    Works when CGWindowListCreateImage fails (permission or Space issues).
+    screencapture has its own Screen Recording permission entry and can
+    capture windows across macOS Spaces."""
+    # Use a unique temp path to avoid race condition if somehow 2 processes run
+    tmp_fd, tmp_path = tempfile.mkstemp(suffix=".png", prefix="kiro-capture-")
+    os.close(tmp_fd)
+    try:
+        result = subprocess.run(
+            ["screencapture", "-l", str(window_id), "-x", "-o", tmp_path],
+            timeout=5, capture_output=True
+        )
+        if result.returncode == 0 and os.path.exists(tmp_path):
+            file_size = os.path.getsize(tmp_path)
+            if file_size > 1000:  # Minimum sanity check (not just header)
+                image = _load_cgimage_from_file(tmp_path)
+                if image:
+                    return image
+            else:
+                log.info(f"   screencapture produced tiny file ({file_size}B) — likely blank")
+    except (subprocess.TimeoutExpired, OSError) as e:
+        log.warning(f"screencapture fallback error: {e}")
+    finally:
+        try:
+            os.remove(tmp_path)
+        except OSError as e:
+            log.warning(f"   Could not remove screencapture temp file {tmp_path}: {e}")
+    return None
+
+
 def ocr_window(win):
     """Capture and OCR the Kiro window in memory.
-    Uses CGWindowListCreateImage for background-safe capture.
+    Primary: CGWindowListCreateImage (fast, in-memory, no disk I/O).
+    Fallback: screencapture -l (handles permission/Space issues).
     Works even when Kiro is behind other apps."""
     window_id = win.get("windowID")
     if not window_id:
         return []
 
-    # Capture specific window in-memory (works when Kiro is in background)
+    used_fallback = False
+
+    # PRIMARY: Capture specific window in-memory
     # kCGWindowImageBoundsIgnoreFraming excludes window shadow/border
-    # so image dimensions match kCGWindowBounds exactly
     image = CGWindowListCreateImage(
-        CGRectNull,  # Capture full window bounds
+        CGRectNull,
         kCGWindowListOptionIncludingWindow,
         window_id,
-        1  # kCGWindowImageBoundsIgnoreFraming — excludes shadow
+        1  # kCGWindowImageBoundsIgnoreFraming
     )
+
+    # FALLBACK chain when CGWindowListCreateImage fails:
+    #   1. screencapture CLI (every 3rd attempt)
+    #   2. Bring-to-front + capture (every 15th attempt, only when on different Space)
     if not image:
-        return []
+        if not hasattr(ocr_window, '_no_image_count'):
+            ocr_window._no_image_count = 0
+        ocr_window._no_image_count += 1
+
+        # Fallback 1: screencapture CLI (throttled)
+        if ocr_window._no_image_count % 3 == 1:
+            image = _screencapture_fallback(window_id)
+            if image:
+                used_fallback = True
+                if ocr_window._no_image_count <= 3:
+                    log.info(f"   Using screencapture fallback")
+                ocr_window._no_image_count = 0
+
+        # Fallback 2: Bring Kiro to front briefly, capture, restore
+        # Only when window is offscreen (different Space) and after 5+ failures
+        # Throttled to every 15th attempt to minimize disruption
+        if not image and win.get("offscreen") and ocr_window._no_image_count >= 5:
+            if ocr_window._no_image_count % 15 == 5:
+                kiro_pid = win.get("pid")
+                if kiro_pid:
+                    log.info(f"   Attempting bring-to-front capture (failures={ocr_window._no_image_count})")
+                    prev_app = bring_kiro_to_front(kiro_pid)
+                    time.sleep(0.3)  # Brief wait for Space switch animation
+                    image = CGWindowListCreateImage(
+                        CGRectNull,
+                        kCGWindowListOptionIncludingWindow,
+                        window_id,
+                        1
+                    )
+                    if image:
+                        used_fallback = True
+                        log.info(f"   Bring-to-front capture succeeded")
+                        ocr_window._no_image_count = 0
+                    else:
+                        log.info(f"   Bring-to-front capture also failed")
+                    restore_previous_app(prev_app)
+
+        if not image:
+            if ocr_window._no_image_count <= 3 or ocr_window._no_image_count % 30 == 0:
+                log.info(f"   All capture methods failed (wid={window_id}, count={ocr_window._no_image_count})")
+            return []
+
+    # ─── Performance: skip OCR if screenshot unchanged ───────────────────
+    # Hash the raw pixel data of the captured image. If screen didn't change
+    # since last cycle AND last OCR had no trigger text, skip expensive OCR.
+    global _last_img_hash, _last_img_had_trigger
+    try:
+        import Quartz as _Q
+        data_provider = _Q.CGImageGetDataProvider(image)
+        raw_data = _Q.CGDataProviderCopyData(data_provider)
+        if raw_data:
+            img_hash = hashlib.md5(bytes(raw_data)).hexdigest()
+            if img_hash == _last_img_hash and not _last_img_had_trigger:
+                return []   # Screen unchanged and no trigger last time — skip OCR
+            _last_img_hash = img_hash
+    except Exception:
+        pass  # Hash failed — proceed with OCR normally
 
     # Diagnostic: log image dimensions vs window bounds (Retina check)
     img_w = Quartz.CGImageGetWidth(image)
     img_h = Quartz.CGImageGetHeight(image)
     if not hasattr(ocr_window, '_diag_done'):
         ocr_window._diag_done = True
-        log.info(f"   DIAG: image={img_w}x{img_h} window={win['w']}x{win['h']} ratio={img_w/win['w']:.1f}x")
+        src = "screencapture" if used_fallback else "CGWindowListCreateImage"
+        log.info(f"   DIAG: image={img_w}x{img_h} window={win['w']}x{win['h']} ratio={img_w/win['w']:.1f}x (via {src})")
         # Save image for visual inspection
         try:
             from Quartz import CGImageDestinationCreateWithURL, CGImageDestinationAddImage, CGImageDestinationFinalize
@@ -398,6 +561,23 @@ def ocr_window(win):
     start = time.time()
     while not completed[0] and time.time() - start < timeout:
         time.sleep(0.05)
+
+    # Diagnostic: log when image was captured but OCR returned nothing
+    if not results and image:
+        if not hasattr(ocr_window, '_empty_count'):
+            ocr_window._empty_count = 0
+        ocr_window._empty_count += 1
+        if ocr_window._empty_count <= 3 or ocr_window._empty_count % 30 == 0:
+            log.info(f"   OCR returned 0 results (image={img_w}x{img_h}, offscreen={win.get('offscreen', False)}, count={ocr_window._empty_count})")
+    elif results:
+        ocr_window._empty_count = 0
+
+    # Update trigger cache for image-hash skip decision next cycle
+    if results:
+        results_text_lower = " ".join(r["text"].lower() for r in results)
+        _last_img_had_trigger = any(t in results_text_lower for t in TRIGGER_TEXTS)
+    else:
+        _last_img_had_trigger = False
 
     return results
 
@@ -505,14 +685,15 @@ def ax_press_button(kiro_pid, button_titles, ocr_confirmed_dialog=False, win=Non
 
 # ─── OCR Position-Based Click ────────────────────────────────────────
 
-def ocr_find_dialog_button(ocr_results, win, ocr_confirmed_dialog=False):
+def ocr_find_dialog_button(ocr_results, win, ocr_confirmed_dialog=False, bg_process_y=None):
     """Find a pressable dialog button via OCR position.
     Returns (button_text, pixel_x, pixel_y) or None.
     
     Strategy:
     1. Primary: find 'Run'/'Trust'/Play icon text on SAME line as 'Reject'
     2. Fallback: if dialog is confirmed via trigger text but no 'Reject' visible
-       (Kiro may use icon-only buttons), search bottom 30% for Play/Run text
+       (Kiro may use icon-only buttons), search bottom 30% for Play/Run text  
+    3. Background process: find Play/Run icon near 'Background process' label
     """
     # Find the Y position of "reject" text (dialog indicator)
     reject_y = None
@@ -574,6 +755,47 @@ def ocr_find_dialog_button(ocr_results, win, ocr_confirmed_dialog=False):
                     log.info(f"   DIAG: norm=({r['x']:.3f},{r['y']:.3f}) size=({r['w']:.3f}x{r['h']:.3f})")
                     return btn_text, px, py
         log.info(f"   Strategy 2 also failed - no button text in bottom 30% (min_w={MIN_BTN_WIDTH})")
+    
+    # Strategy 3: Background process Run button
+    # Kiro shows 'Background process' blocks with icon buttons (edit, stop, reload, run/play)
+    # The ▷/Run button is the RIGHTMOST icon in the header row
+    if bg_process_y is not None:
+        BG_Y_TOLERANCE = 0.06  # Wider tolerance — icon buttons may be slightly offset
+
+        # 3a: Look for Play/Run icon text near the Background process label line
+        bg_btn_texts = ["▶", "►", "▷", "⏵", "run", "play"]
+        for btn_text in bg_btn_texts:
+            for r in ocr_results:
+                text = r["text"].strip().lower()
+                if text == btn_text and abs(r["y"] - bg_process_y) < BG_Y_TOLERANCE:
+                    px, py = _coords(r)
+                    log.info(f"   OCR found '{btn_text}' at ({px}, {py}) - near Background process (w={r['w']:.3f})")
+                    return btn_text, px, py
+
+        # 3b: Look for the rightmost small OCR element near bg_process_y
+        rightmost = None
+        for r in ocr_results:
+            text = r["text"].strip()
+            if (len(text) <= 3 and abs(r["y"] - bg_process_y) < BG_Y_TOLERANCE 
+                    and r["x"] > 0.8):
+                if rightmost is None or r["x"] > rightmost["x"]:
+                    rightmost = r
+        if rightmost:
+            px, py = _coords(rightmost)
+            log.info(f"   OCR found rightmost icon '{rightmost['text']}' at ({px}, {py}) - near Background process")
+            return "run", px, py
+
+        # 3c: Position-based fallback — icon buttons are NOT text, OCR can't read them
+        # Kiro's UI layout: the Run ▷ button is always the rightmost icon at ~97% window width
+        # on the same line as "Background process" label
+        win_x, win_y = win["x"], win["y"]
+        win_w, win_h = win["w"], win["h"]
+        # Click at far right (~97% width) on the Background process row
+        px = win_x + int(0.97 * win_w)
+        py = win_y + int((bg_process_y + 0.008) * win_h)  # Small offset to center vertically on icon
+        log.info(f"   Strategy 3c: position-based click at ({px}, {py}) - rightmost icon on BG process row")
+        log.info(f"   DIAG: win=({win_x},{win_y}) {win_w}x{win_h}, bg_y={bg_process_y:.3f}")
+        return "run", px, py
     
     return None
 
@@ -662,10 +884,11 @@ def click_at_position(x, y, kiro_pid=None, win=None):
             None, Quartz.kCGEventLeftMouseUp, point, Quartz.kCGMouseButtonLeft)
 
         # Target specific window/PID — delivers click without bringing to front
+        # kCGEventTargetUnixProcessID field index (documented in CGEventTypes.h)
+        _CG_EVENT_TARGET_PID = 40
         if kiro_pid:
-            # kCGEventTargetUnixProcessID = 40
-            Quartz.CGEventSetIntegerValueField(evt_down, 40, kiro_pid)
-            Quartz.CGEventSetIntegerValueField(evt_up, 40, kiro_pid)
+            Quartz.CGEventSetIntegerValueField(evt_down, _CG_EVENT_TARGET_PID, kiro_pid)
+            Quartz.CGEventSetIntegerValueField(evt_up, _CG_EVENT_TARGET_PID, kiro_pid)
 
         Quartz.CGEventPost(Quartz.kCGHIDEventTap, evt_down)
         Quartz.CGEventPost(Quartz.kCGHIDEventTap, evt_up)
@@ -800,8 +1023,6 @@ def analyze_command_safety(cmd_text, all_text_lower):
     5. DANGEROUS_PATTERNS in full command
     6. BANNED_KEYWORDS check
     """
-    import unicodedata
-
     # No command visible -> safe to approve (it's just a dialog)
     if not cmd_text:
         return True, "No command text detected"
@@ -815,16 +1036,27 @@ def analyze_command_safety(cmd_text, all_text_lower):
     cmd_lower = cmd_normalized.lower().strip()
 
     # === FIX #1: Command chaining detection ===
-    # Block commands that chain multiple operations
-    CHAIN_OPERATORS = ['&&', '||', ';', '`', '$(']
-    for op in CHAIN_OPERATORS:
+    # Block commands that chain multiple operations.
+    # IMPORTANT: strip quoted string contents first to avoid false positives.
+    # Example: curl -A "Mozilla/5.0 (Macintosh; Intel Mac OS X...)" contains `;`
+    # inside a quoted value — that is NOT command chaining.
+    # Strategy: replace content of "..." and '...' with placeholder before checking
+    # `;`, backtick, and `$(`. Keep `&&` and `||` on full string (safe — they won't
+    # appear as values in normal commands).
+    cmd_unquoted = re.sub(r'"[^"]*"|\x27[^\x27]*\x27', '""', cmd_lower)
+
+    # && and || are checked on the full string (very unlikely inside quoted values)
+    for op in ['&&', '||']:
         if op in cmd_lower:
+            return False, f"Command chaining detected: '{op}'"
+    # ; backtick $( are checked only OUTSIDE of quoted strings
+    for op in [';', '`', '$(']: 
+        if op in cmd_unquoted:
             return False, f"Command chaining detected: '{op}'"
     
     # Pipe to shell (| sh, | bash, | zsh) - but allow safe pipes (| grep, | sort)
-    DANGEROUS_PIPE_TARGETS = {'sh', 'bash', 'zsh', 'python', 'python3', 'perl', 
+    DANGEROUS_PIPE_TARGETS = {'sh', 'bash', 'zsh', 'python', 'python3', 'perl',
                                'ruby', 'node', 'eval'}
-    import re
     pipe_matches = re.findall(r'\|\s*(\S+)', cmd_lower)
     for target in pipe_matches:
         target_base = target.split('/')[-1]
@@ -889,6 +1121,7 @@ def analyze_command_safety(cmd_text, all_text_lower):
 
     # All checks passed -> safe
     return True, f"Safe command: {base_cmd}"
+
 # ─── Main ────────────────────────────────────────────────────────────
 
 def monitor_cycle():
@@ -905,6 +1138,16 @@ def monitor_cycle():
     if not ocr_results:
         stuck_cycles = 0
         return
+
+    # DIAGNOSTIC: Log all OCR text periodically (every 10 cycles)
+    if not hasattr(monitor_cycle, '_diag_counter'):
+        monitor_cycle._diag_counter = 0
+    monitor_cycle._diag_counter += 1
+    if monitor_cycle._diag_counter % 10 == 1:
+        all_texts = [f"'{r['text'].strip()}' y={r['y']:.2f} x={r['x']:.2f} w={r['w']:.3f}" for r in ocr_results]
+        log.info(f"   DIAG-OCR: {len(ocr_results)} blocks detected:")
+        for t in all_texts[:25]:
+            log.info(f"      {t}")
 
     # Check for trigger text - must be a STANDALONE OCR text block
     # (not part of a longer paragraph like in README/Settings)
@@ -926,6 +1169,18 @@ def monitor_cycle():
     # Also check for accept all / reject all (Kiro v0.8+)
     has_accept_all = "accept all" in all_text_lower and "reject all" in all_text_lower
 
+    # Check for 'Background process' block with Run/Play button
+    # This is a separate Kiro UI pattern where a background command needs to be started
+    bg_process_y = None
+    has_bg_process = False
+    for r in ocr_results:
+        text = r["text"].strip().lower()
+        if "background process" in text or (text == "background" and r["w"] > 0.02):
+            bg_process_y = r["y"]
+            has_bg_process = True
+            log.info(f"   Detected 'Background process' at y={bg_process_y:.3f}")
+            break
+
     # OCR visual verification: require "reject" as STANDALONE button text
     # (not substring in paragraph like 'Accept All / Reject All prompts...')
     # Real button: OCR text is exactly "Reject" or "reject" (short, standalone)
@@ -939,15 +1194,15 @@ def monitor_cycle():
     # Only confirm dialog when BOTH trigger AND standalone dialog buttons are visible
     ocr_confirmed_dialog = bool(matched_trigger) and ocr_sees_dialog_buttons
 
-    if not matched_trigger and not has_accept_all:
+    if not matched_trigger and not has_accept_all and not has_bg_process:
         stuck_cycles = 0
         return
 
-    # If trigger found but no dialog buttons visible, likely Settings/README/Output panel
-    if matched_trigger and not ocr_sees_dialog_buttons and not has_accept_all:
+    # If trigger found but no dialog buttons visible AND no bg process, likely Settings/README/Output panel
+    if matched_trigger and not ocr_sees_dialog_buttons and not has_accept_all and not has_bg_process:
         return
 
-    trigger_label = matched_trigger or "Accept All/Reject All"
+    trigger_label = matched_trigger or ("Background process" if has_bg_process else "Accept All/Reject All")
     log.info(f"Detected: '{trigger_label}'")
 
     # Extract actual command text from OCR (near "Command" label)
@@ -990,18 +1245,40 @@ def monitor_cycle():
     }
 
     learn_pattern = None
+    auto_trust_signal = False   # Set True when frequency threshold crossed
     if cmd_text:
         base_cmd = cmd_text.strip().split()[0] if cmd_text.strip() else None
         if base_cmd:
-            # Strip path prefix (e.g. /usr/bin/diff -> diff)
-            base_cmd = base_cmd.split("/")[-1]
+            base_cmd = base_cmd.split("/")[-1]  # Strip path prefix (/usr/bin/diff → diff)
             if base_cmd.lower() in NEVER_LEARN:
                 log.info(f"   '{base_cmd}' is in NEVER_LEARN - will not auto-trust")
             elif cmd_text.strip().startswith("sudo "):
                 log.info(f"   sudo command - will not auto-trust")
             else:
-                learn_pattern = f"{base_cmd} *"
-                log.info(f"   Learn pattern: '{learn_pattern}'")
+                # === Smarter pattern extraction ===
+                # Short commands (≤3 tokens, no file paths) → exact pattern (safer)
+                # Long commands or path args → wildcard pattern
+                cmd_parts = cmd_text.strip().split()
+                has_path_arg = any("/" in p and not p.startswith("-") for p in cmd_parts[1:])
+                is_short = len(cmd_parts) <= 3
+                if is_short and not has_path_arg:
+                    # Use exact pattern: "tsc --noEmit" or "make clean"
+                    learn_pattern = cmd_text.strip()
+                else:
+                    # Use wildcard: "eslint *"
+                    learn_pattern = f"{base_cmd} *"
+                log.info(f"   Learn pattern: '{learn_pattern}' (exact={is_short and not has_path_arg})")
+
+                # === Frequency-based auto-trust ===
+                _approval_freq[learn_pattern] = _approval_freq.get(learn_pattern, 0) + 1
+                count_seen = _approval_freq[learn_pattern]
+                if count_seen >= AUTO_TRUST_THRESHOLD:
+                    auto_trust_signal = True
+                    log.info(f"   AUTO-TRUST threshold reached ({count_seen}x): '{learn_pattern}'")
+                    save_learned()  # Persist updated counts
+                elif count_seen % 2 == 0:
+                    save_learned()  # Save periodically (every 2 approvals)
+
 
     if kiro_pid:
         # === PRIMARY: AX API (handles icon buttons like Play ▶) ===
@@ -1013,25 +1290,39 @@ def monitor_cycle():
             log.info(f"AX pressed '{btn_title}' (#{count})")
             send_notification(f"Auto-approved '{btn_title}' (#{count})")
             log_action("auto-approved", cmd_text or btn_title,
-                      f"Trigger: {trigger_label} [AX API]", learn_pattern)
+                      f"Trigger: {trigger_label} [AX API]", learn_pattern, auto_trust_signal)
             stuck_cycles = 0
             time.sleep(2)  # Wait for Kiro UI to update
             return
 
-        # === SECONDARY: OCR-position click (fallback for text buttons) ===
-        # Dialog buttons may be web-rendered; find via OCR position near "Reject"
-        dialog_btn = ocr_find_dialog_button(ocr_results, win, ocr_confirmed_dialog=ocr_confirmed_dialog)
-        if dialog_btn:
-            btn_text, px, py = dialog_btn
-            if click_at_position(px, py, kiro_pid=kiro_pid, win=win):
-                count = record_click(cmd_text)
-                log.info(f"OCR-click pressed '{btn_text}' at ({px},{py}) (#{count})")
-                send_notification(f"Auto-approved '{btn_text}' (#{count})")
-                log_action("auto-approved", cmd_text or btn_text,
-                          f"Trigger: {trigger_label} [OCR-click]", learn_pattern)
-                stuck_cycles = 0
-                time.sleep(2)  # Wait for Kiro UI to update
-                return
+        # === SECONDARY: OCR-position click (fallback for web-rendered buttons) ===
+        # Dialog buttons may be web-rendered in Electron; find via OCR position near "Reject".
+        # Also handles Background process Run buttons (Strategy 3).
+        #
+        # ⚠️  OFFSCREEN GUARD: Only click when Kiro is on the CURRENT macOS Space.
+        # When Kiro is on a different Space (offscreen=True), the pixel coordinates
+        # at Kiro's position belong to WHATEVER APP is visible on the current Space.
+        # click_at_position() would hit that other app instead of Kiro.
+        # AX API above is process-level (cross-Space safe); pixel clicks are not.
+        if win.get("offscreen"):
+            log.info("   Kiro is on a different Space — OCR-click skipped to prevent misfire on other apps")
+            log.info("   AX API method already attempted above; waiting for user to switch to Kiro's Space")
+            # Fall through to stuck_cycles so user gets notified after STUCK_THRESHOLD
+        else:
+            dialog_btn = ocr_find_dialog_button(ocr_results, win, ocr_confirmed_dialog=ocr_confirmed_dialog, bg_process_y=bg_process_y)
+            if dialog_btn:
+                btn_text, px, py = dialog_btn
+                if click_at_position(px, py, kiro_pid=kiro_pid, win=win):
+                    count = record_click(cmd_text)
+                    source = "BG-process" if has_bg_process else "OCR-click"
+                    log.info(f"{source} pressed '{btn_text}' at ({px},{py}) (#{count})")
+                    send_notification(f"Auto-approved '{btn_text}' (#{count})")
+                    log_action("auto-approved", cmd_text or btn_text,
+                              f"Trigger: {trigger_label} [{source}]", learn_pattern, auto_trust_signal)
+                    stuck_cycles = 0
+                    time.sleep(2)  # Wait for Kiro UI to update
+                    return
+
 
     # No button found - possible stuck state
     stuck_cycles += 1
@@ -1066,18 +1357,20 @@ def main():
     except (subprocess.CalledProcessError, ValueError):
         pass  # No other instances
 
-    log.info("Kiro AutoRun v2.1.2 - OCR + CGEvent Click")
+    log.info("Kiro AutoRun v2.1.4 - OCR + CGEvent Click")
     log.info(f"   Works while Kiro is in background")
     log.info(f"   Does NOT move cursor")
     log.info(f"   Does NOT steal focus")
     log.info(f"   Target: {TARGET_APP}")
     log.info(f"   Triggers: {TRIGGER_TEXTS}")
     log.info(f"   Buttons: {CLICKABLE_BUTTONS}")
-    log.info(f"   Poll: {POLL_INTERVAL}s")
+    log.info(f"   Poll: adaptive {POLL_SLOW}s/{POLL_NORMAL}s/{POLL_FAST}s (idle/normal/trigger)")
     log.info(f"   Banned: {len(BANNED_KEYWORDS)} keywords")
     log.info(f"   Config: {CONFIG_FILE}")
     log.info(f"   Action log: {ACTION_LOG_FILE}")
     log.info("")
+
+    load_learned()   # Restore approval frequency counts from previous session
 
     win = find_kiro_window()
     if win:
@@ -1090,14 +1383,32 @@ def main():
 
     while running:
         try:
+            # Snapshot trigger state before cycle
+            kiro_present = bool(find_kiro_window())
+            had_trigger_before = _last_img_had_trigger
+
             monitor_cycle()
+
+            # Adaptive sleep:
+            #  - No Kiro window   → POLL_SLOW (5s)  — conserve CPU
+            #  - Trigger visible  → POLL_FAST (0.8s) — react immediately
+            #  - Normal idle      → POLL_NORMAL (2s)
+            if not kiro_present:
+                sleep_dur = POLL_SLOW
+            elif had_trigger_before or _last_img_had_trigger:
+                sleep_dur = POLL_FAST
+            else:
+                sleep_dur = POLL_NORMAL
+
         except KeyboardInterrupt:
             break
         except Exception as e:
             log.error(f"Cycle error: {e}")
-        time.sleep(POLL_INTERVAL)
+            sleep_dur = POLL_NORMAL
 
-    log.info("Stopped")
+        time.sleep(sleep_dur)
+
+    log.info("Stopped")  
 
 if __name__ == "__main__":
     main()
