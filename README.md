@@ -1,5 +1,10 @@
 # Kiro AutoRun
 
+[![Visual Studio Marketplace](https://img.shields.io/visual-studio-marketplace/v/ANLE.kiro-autorun?style=for-the-badge&logo=visual-studio-code&logoColor=white&label=Marketplace&color=007ACC)](https://marketplace.visualstudio.com/items?itemName=ANLE.kiro-autorun)
+[![GitHub Release](https://img.shields.io/github/v/release/anlvdt/kiro-autorun?style=for-the-badge&logo=github&label=Release)](https://github.com/anlvdt/kiro-autorun/releases/latest)
+[![Installs](https://img.shields.io/visual-studio-marketplace/i/ANLE.kiro-autorun?style=for-the-badge&logo=visual-studio-code&logoColor=white&color=28a745)](https://marketplace.visualstudio.com/items?itemName=ANLE.kiro-autorun)
+[![License](https://img.shields.io/github/license/anlvdt/kiro-autorun?style=for-the-badge)](LICENSE.md)
+
 Smart auto-approval for Kiro IDE command prompts with banned-keyword safety. **macOS only.**
 
 ## The Problem
@@ -61,8 +66,20 @@ Kiro IDE requires manual approval for commands the AI agent runs. This creates f
 
 ## Installation
 
+### From Marketplace (Recommended)
+
+**[Install from Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=ANLE.kiro-autorun)**
+
+Or search for **"Kiro AutoRun"** in the Extensions panel (`Cmd+Shift+X`).
+
+### From GitHub Releases
+
+1. Download the latest `.vsix` file from [GitHub Releases](https://github.com/anlvdt/kiro-autorun/releases/latest)
+2. In Kiro/VS Code: Extensions > `...` > **Install from VSIX** > select the downloaded file
+
+### Build from Source
+
 ```bash
-# Build from source
 cd kiro-autorun
 npm install
 npm run compile

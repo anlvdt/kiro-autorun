@@ -2,6 +2,11 @@
 
 All notable changes to the "kiro-autorun" extension will be documented in this file.
 
+## [2.1.6] - 2026-03-18
+### Added
+- Added Visual Studio Marketplace and GitHub Releases download badges to README.
+- Added direct install links for Marketplace, GitHub Releases, and build-from-source in Installation section.
+
 ## [2.1.5] - 2026-03-16
 ### Added
 - Centralized `NEVER_LEARN` validation to reliably block auto-trusting dangerous commands.
