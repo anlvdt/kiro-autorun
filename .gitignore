@@ -7,3 +7,5 @@ out/
 *.bak.*
 .DS_Store
 ._*
+__pycache__/  
+*.pyc  

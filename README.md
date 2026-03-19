@@ -5,7 +5,7 @@
 [![Installs](https://img.shields.io/visual-studio-marketplace/i/ANLE.kiro-autorun?style=for-the-badge&logo=visual-studio-code&logoColor=white&color=28a745)](https://marketplace.visualstudio.com/items?itemName=ANLE.kiro-autorun)
 [![License](https://img.shields.io/github/license/anlvdt/kiro-autorun?style=for-the-badge)](LICENSE.md)
 
-Smart auto-approval for Kiro IDE command prompts with banned-keyword safety. **macOS only.**
+Smart auto-approval for Kiro IDE command prompts with banned-keyword safety. **macOS & Windows.**
 
 ## The Problem
 
@@ -24,7 +24,9 @@ Kiro IDE requires manual approval for commands the AI agent runs. This creates f
 **Hybrid 2-layer approach:**
 
 - **Layer 1 (Settings API)**: Automatically configures Kiro's `trustedCommands` and `commandDenylist` settings with 100+ safe patterns. Handles ~90% of approval dialogs natively.
-- **Layer 2 (OCR + Click)**: A Python backend uses **macOS Vision OCR** to detect "Waiting on your input" text, locates the **Run** button via OCR position matching, and clicks it using **CGEvent** - with click guard (bounds check) and cursor save/restore.
+- **Layer 2 (OCR + Click)**: A Python backend detects "Waiting on your input" text via OCR, locates the **Run/Accept All** button, and clicks it — with click guard (bounds check) and cooldown.
+  - **macOS**: Vision framework OCR + CGEvent click (cursor save/restore)
+  - **Windows**: WinRT OCR (built-in) + UI Automation API (preferred) / position-based click fallback. Scans ALL Kiro windows. Button priority: Run > Accept All > Reject All > Trust.
 
 ```
 +----------------------------------------------+
@@ -35,10 +37,10 @@ Kiro IDE requires manual approval for commands the AI agent runs. This creates f
 |  +- Auto-learn safe patterns                 |
 |  +- Polls action log from Python backend     |
 |                                              |
-|  Python Backend (launched via Terminal.app)   |
+|  Python Backend (auto-launched)              |
 |  +- OCR: "Waiting on your input" detection   |
 |  +- OCR-position button finding (Run/Trust)  |
-|  +- CGEvent click with bounds guard          |
+|  +- Smart click (UIA / CGEvent / SendMsg)    |
 |  +- Smart command safety analysis            |
 |  +- Anti-loop: screen state hashing          |
 |  +- Stuck recovery: log after timeout        |
@@ -49,20 +51,47 @@ Kiro IDE requires manual approval for commands the AI agent runs. This creates f
 
 ## Key Features
 
-- **No cursor movement** - uses CGEvent with cursor save/restore (<50ms)
+- **No cursor movement** - macOS: CGEvent with cursor save/restore; Windows: UI Automation API (primary), position-based click (fallback)
+- **Multi-window scanning** - scans all Kiro windows to find active prompts
 - **Background operation** - works while Kiro is behind other windows
-- **Smart safety** - 28 banned keywords, inherently dangerous commands blocked, pipe-to-shell detection
+- **Cross-platform** - macOS (Vision + Quartz) and Windows (WinRT + Win32)
+- **Smart safety** - 28+ banned keywords, inherently dangerous commands blocked, pipe-to-shell detection
 - **Auto-learning** - learns safe command patterns and adds to Kiro's trustedCommands
 - **NEVER_LEARN list** - dangerous base commands (rm, sudo, curl, etc.) are never auto-trusted
-- **Click guard** - verifies target coordinates are inside Kiro window before clicking
+- **Click guard** - verifies target coordinates are inside Kiro window, with 30px edge margin
 - **Anti-loop** - screen hash cooldown prevents re-clicking same prompt
 - **Alert sound** - audio notification when a command is blocked
 
 ## Requirements
 
-- **macOS** (uses Vision framework + Quartz for screen capture and CGEvent for clicking)
+### macOS
+
+- **macOS 10.15+** (uses Vision framework + Quartz for screen capture and CGEvent for clicking)
 - **Terminal.app** must have **Accessibility** and **Screen Recording** permissions
 - Python 3 with `pyobjc-framework-Quartz` and `pyobjc-framework-Vision`
+
+```bash
+pip3 install pyobjc-framework-Quartz pyobjc-framework-Vision
+```
+
+### Windows
+
+- **Windows 10/11**
+- **Python 3.10+** — [Download](https://www.python.org/downloads/) or `winget install Python.Python.3.12`
+- Python packages:
+
+```bash
+pip install pywin32 Pillow winrt-runtime winrt-Windows.Media.OCR winrt-Windows.Graphics.Imaging winrt-Windows.Globalization winrt-Windows.Storage.Streams comtypes
+```
+
+| Package | Purpose |
+|---------|--------|
+| `pywin32` | Win32 API — window finding, screen capture, DWM rect |
+| `Pillow` | Image processing |
+| `winrt-runtime` + `winrt-Windows.*` | Windows built-in OCR (WinRT) |
+| `comtypes` | UI Automation API — click buttons without cursor movement |
+
+> **Note:** `winocr` or `pytesseract` can be used as alternative OCR engines if the WinRT packages are unavailable.
 
 ## Installation
 
@@ -121,8 +150,8 @@ npm run package
 - **NEVER_LEARN** - prevents auto-trusting dangerous base commands (rm, sudo, curl, npm, etc.)
 - **Anti-loop cooldown** - screen state hashing prevents re-clicking same prompt
 - **Click debouncing** - minimum 2s between clicks to prevent rapid double-clicks
-- **Click guard** - verifies coordinates are inside Kiro window before CGEvent click
-- **Stuck recovery** - logs warning after prolonged stuck state
+- **Click guard** - verifies coordinates are inside Kiro window with edge margins
+- **Stuck recovery** - logs warning after prolonged stuck state, enables position-based click fallback after 5+ stuck cycles
 - **Alert sound** - audio notification when a command is blocked
 
 Default banned keywords include: `rm -rf`, `sudo rm`, `chmod 777`, `curl | sh`, `git push --force`, `git reset --hard`, `drop table`, `shutdown`, `kill -9`, `killall`, fork bomb, reverse shells, credential access, and more.

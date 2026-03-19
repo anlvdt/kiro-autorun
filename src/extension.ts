@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as crypto from 'crypto';
 import { exec, spawn } from 'child_process';
 import { getConfig, setConfigValue, writeConfigFile, onConfigChange, ACTION_LOG_FILE } from './config';
@@ -21,9 +22,12 @@ let lastActionLogLines = 0;
 let healthCheckInterval: ReturnType<typeof setInterval> | undefined;
 
 /**
- * Get the path to the bundled Python script
+ * Get the path to the bundled Python script for the current platform
  */
 function getPythonScriptPath(context: vscode.ExtensionContext): string {
+    if (isWindows()) {
+        return path.join(context.extensionPath, 'kiro-autorun-win.py');
+    }
     return path.join(context.extensionPath, 'kiro-autorun-v3.py');
 }
 
@@ -35,6 +39,13 @@ function isMacOS(): boolean {
 }
 
 /**
+ * Check if the current platform is Windows
+ */
+function isWindows(): boolean {
+    return process.platform === 'win32';
+}
+
+/**
  * Start the Python backend via external Terminal.app.
  * Terminal.app already has Accessibility + Screen Recording permissions.
  */
@@ -43,8 +54,8 @@ function startBackend(context: vscode.ExtensionContext): void {
         return;
     }
 
-    if (!isMacOS()) {
-        outputChannel.appendLine('[WARN] macOS backend not available — Layer 1 (Settings API) still active');
+    if (!isMacOS() && !isWindows()) {
+        outputChannel.appendLine('[WARN] Backend not available on this platform — Layer 1 (Settings API) still active');
         return;
     }
 
@@ -79,21 +90,52 @@ function startBackend(context: vscode.ExtensionContext): void {
     outputChannel.appendLine('Launching AutoRun backend...');
     outputChannel.appendLine(`   Script: ${scriptPath}`);
 
-    // Set LSUIElement to hide Python Dock icon
-    exec('defaults write org.python.python LSUIElement -bool true 2>/dev/null');
-
-    // Strategy: Launch Python directly via child_process.spawn (detached)
-    // No Terminal.app needed — avoids "terminate processes" dialog
-    const logFd = fs.openSync('/tmp/kiro-autorun.log', 'a'); // 'a' = append — preserve history, don't reset mtime on start
     let child: ReturnType<typeof spawn>;
-    try {
-        child = spawn('python3', [scriptPath], {
-            detached: true,
-            stdio: ['ignore', logFd, logFd],
-            env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1' },
-        });
-    } finally {
-        fs.closeSync(logFd); // Close our fd — child has its own copy
+
+    if (isWindows()) {
+        // Windows: spawn pythonw (no console window) or python
+        const logFile = path.join(os.homedir(), '.kiro-autorun', 'backend.log');
+        const logDir = path.dirname(logFile);
+        if (!fs.existsSync(logDir)) {
+            fs.mkdirSync(logDir, { recursive: true });
+        }
+        const logFd = fs.openSync(logFile, 'a');
+        try {
+            child = spawn('pythonw', [scriptPath], {
+                detached: true,
+                stdio: ['ignore', logFd, logFd],
+                env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1' },
+                windowsHide: true,
+            });
+        } catch {
+            // pythonw not found, try python
+            try {
+                child = spawn('python', [scriptPath], {
+                    detached: true,
+                    stdio: ['ignore', logFd, logFd],
+                    env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1' },
+                    windowsHide: true,
+                });
+            } finally {
+                // handled below
+            }
+        } finally {
+            fs.closeSync(logFd);
+        }
+    } else {
+        // macOS: Set LSUIElement to hide Python Dock icon
+        exec('defaults write org.python.python LSUIElement -bool true 2>/dev/null');
+
+        const logFd = fs.openSync('/tmp/kiro-autorun.log', 'a');
+        try {
+            child = spawn('python3', [scriptPath], {
+                detached: true,
+                stdio: ['ignore', logFd, logFd],
+                env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1' },
+            });
+        } finally {
+            fs.closeSync(logFd);
+        }
     }
 
     child.unref(); // Allow Kiro to exit without waiting for Python
@@ -103,7 +145,7 @@ function startBackend(context: vscode.ExtensionContext): void {
         setStartTime();
         setBackendHealth(true);
         updateStatusBar(config, true);
-        outputChannel.appendLine(`Backend running (PID: ${child.pid}). Log: /tmp/kiro-autorun.log`);
+        outputChannel.appendLine(`Backend running (PID: ${child.pid}). Log: ${getBackendLogPath()}`);
         startActionLogWatcher();
         startHealthCheck(context);
     } else {
@@ -123,10 +165,17 @@ function stopBackend(): void {
     stopHealthCheck();
 
     if (isRunning) {
-        // Kill the python process — use -f (contains match, actual binary is Python not python3)
-        exec('pkill -f kiro-autorun-v3.py', () => {
-            outputChannel.appendLine('Backend stopped');
-        });
+        if (isWindows()) {
+            // Windows: kill python process by script name using PowerShell
+            exec('powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like \'*kiro-autorun-win*\' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"', () => {
+                outputChannel.appendLine('Backend stopped');
+            });
+        } else {
+            // macOS: Kill the python process
+            exec('pkill -f kiro-autorun-v3.py', () => {
+                outputChannel.appendLine('Backend stopped');
+            });
+        }
         isRunning = false;
     }
     setBackendHealth(false); // Mark as not healthy when stopped
@@ -181,7 +230,16 @@ function stopActionLogWatcher(): void {
     }
 }
 
-const BACKEND_LOG = '/tmp/kiro-autorun.log';
+/**
+ * Get the backend log file path (platform-aware)
+ */
+function getBackendLogPath(): string {
+    if (isWindows()) {
+        return path.join(os.homedir(), '.kiro-autorun', 'backend.log');
+    }
+    return '/tmp/kiro-autorun.log';
+}
+
 const HEALTH_TIMEOUT_MS = 300_000; // 300s (5 min) without log update = backend lost
                                     // Python only logs when Kiro shows a prompt, so 60s was far too short
 
@@ -192,26 +250,33 @@ function startHealthCheck(context: vscode.ExtensionContext): void {
     stopHealthCheck();
     healthCheckInterval = setInterval(() => {
         if (!isRunning) { return; }
+        const backendLog = getBackendLogPath();
         try {
-            if (fs.existsSync(BACKEND_LOG)) {
-                const stat = fs.statSync(BACKEND_LOG);
+            if (fs.existsSync(backendLog)) {
+                const stat = fs.statSync(backendLog);
                 const age = Date.now() - stat.mtimeMs;
                 const wasHealthy = isBackendHealthy();
                 if (age > HEALTH_TIMEOUT_MS) {
                     // Log is stale — verify the Python process is actually dead
-                    exec('pgrep -f kiro-autorun-v3.py', (err, stdout) => {
-                        const processAlive = !err && stdout.trim().length > 0;
+                    const scriptName = isWindows() ? 'kiro-autorun-win' : 'kiro-autorun-v3.py';
+                    const checkCmd = isWindows()
+                        ? `powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*${scriptName}*' } | Select-Object -ExpandProperty ProcessId"`
+                        : `pgrep -f ${scriptName}`;
+
+                    exec(checkCmd, (err, stdout) => {
+                        const output = stdout?.trim() || '';
+                        const processAlive = isWindows()
+                            ? output.split('\n').filter(l => /^\d+/.test(l.trim())).length > 0
+                            : !err && output.length > 0;
+
                         if (processAlive) {
-                            // Process alive but no recent log — just idle (no Kiro prompts)
-                            // Reset the baseline so we don't keep re-checking
                             setBackendHealth(true);
                         } else {
-                            // Process is truly dead → auto-restart
                             setBackendHealth(false);
                             if (wasHealthy) {
                                 outputChannel.appendLine(`[WARN] Backend process died (log stale ${Math.round(age / 1000)}s) — auto-restarting...`);
                             }
-                            isRunning = false; // Allow startBackend to run
+                            isRunning = false;
                             startBackend(context);
                         }
                         updateStatusBar(getConfig(), isRunning);
