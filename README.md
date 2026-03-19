@@ -101,9 +101,14 @@ pip install pywin32 Pillow winrt-runtime winrt-Windows.Media.OCR winrt-Windows.G
 
 Or search for **"Kiro AutoRun"** in the Extensions panel (`Cmd+Shift+X`).
 
+**Direct VSIX download from marketplace:**
+[ANLE.kiro-autorun-2.1.7.vsix](https://marketplace.visualstudio.com/_apis/public/gallery/publishers/ANLE/vsextensions/kiro-autorun/2.1.7/vspackage)
+
 ### From GitHub Releases
 
-1. Download the latest `.vsix` file from [GitHub Releases](https://github.com/anlvdt/kiro-autorun/releases/latest)
+[![Download VSIX](https://img.shields.io/github/v/release/anlvdt/kiro-autorun?style=for-the-badge&logo=github&label=Download%20VSIX&color=28a745)](https://github.com/anlvdt/kiro-autorun/releases/latest/download/kiro-autorun-2.1.7.vsix)
+
+1. Download the latest `.vsix` from [GitHub Releases](https://github.com/anlvdt/kiro-autorun/releases/latest)
 2. In Kiro/VS Code: Extensions > `...` > **Install from VSIX** > select the downloaded file
 
 ### Build from Source
