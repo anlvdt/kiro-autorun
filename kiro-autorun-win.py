@@ -16,7 +16,7 @@ import subprocess, time, sys, os, json, signal, atexit, logging, re, unicodedata
 import ctypes
 import ctypes.wintypes
 
-VERSION = "2.1.23"
+VERSION = "2.1.24"
 
 # Enforce physical coordinates for correct window bounds and mouse_event targeting
 try:
@@ -1067,23 +1067,52 @@ def cv_find_bg_process_run_button(img):
     start_y = int(height * 0.4)
     end_y = int(height * 0.95)  # avoid the AutoRun ON green text at the very bottom
     
-    green_pixels = []
-    # Scan every 2 pixels to save time but avoid missing thin lines
-    for y in range(start_y, end_y, 2):
-        for x in range(int(width * 0.4), width, 2):
+    # Fast scan for green candidates representing the generic Play button
+    green_candidates = []
+    # Scan every 3 pixels to find solid blocks
+    for y in range(start_y, end_y, 3):
+        for x in range(int(width * 0.4), width, 3):
             r, g, b = pixels[x, y]
+            # Strict green constraint for the specific Kiro play icon
             if g > r + 30 and g > b + 30 and g > 100:
-                green_pixels.append((x, y))
+                green_candidates.append((x, y))
 
-    found_targets = []
-    # Check each green pixel to see if there's a red pixel to its left
-    for gx, gy in green_pixels:
-        # Scan to the left (between 15 and 45 pixels away)
-        scan_left_start = max(0, gx - 45)
+    if not green_candidates:
+        return None
+
+    # Group into clusters
+    clusters = []
+    for x, y in green_candidates:
+        added = False
+        for c in clusters:
+            cx, cy, count, minx, maxx, miny, maxy = c
+            if abs(x - cx) < 25 and abs(y - cy) < 25:
+                nc = count + 1
+                c[0] = (cx * count + x) / nc
+                c[1] = (cy * count + y) / nc
+                c[2] = nc
+                c[3] = min(minx, x)
+                c[4] = max(maxx, x)
+                c[5] = min(miny, y)
+                c[6] = max(maxy, y)
+                added = True
+                break
+        if not added:
+            clusters.append([float(x), float(y), 1, x, x, y, y])
+
+    # Filter out massive blocks or noise (Must be a compact block > 3 pixels)
+    valid_greens = [c for c in clusters if 3 < c[2] < 300]
+    
+    for c in valid_greens:
+        gx = int(c[0])
+        gy = int(c[1])
+        
+        # Look to the left for the red Cancel 'x' icon (approx 20-50 px away)
+        found_red = False
+        scan_left_start = max(0, gx - 50)
         scan_left_end = max(0, gx - 15)
         
-        found_red = False
-        for y in range(gy - 6, gy + 6):
+        for y in range(gy - 8, gy + 8):
             if y < 0 or y >= height: continue
             for x in range(scan_left_start, scan_left_end):
                 r, g, b = pixels[x, y]
@@ -1091,16 +1120,11 @@ def cv_find_bg_process_run_button(img):
                 if r > g + 20 and r > b + 20 and r > 100:
                     found_red = True
                     break
-            if found_red: break
-            
+            if found_red:
+                break
+                
         if found_red:
-            found_targets.append((gx, gy))
-
-    if found_targets:
-        # Calculate center of the found matching green pixels
-        avg_gx = int(sum(t[0] for t in found_targets) / len(found_targets))
-        avg_gy = int(sum(t[1] for t in found_targets) / len(found_targets))
-        return (avg_gx, avg_gy)
+            return (gx, gy)
             
     return None
 
@@ -1255,7 +1279,16 @@ def _monitor_window(win):
         _stuck_cycles[hwnd] = 0
         return False
 
-    trigger_label = matched_trigger or ("Background process" if has_bg_process else "Accept All/Reject All")
+    # Obfuscate trigger names in logs to prevent OCR from reading our own output and looping
+    if matched_trigger and "waiting on your input" in matched_trigger:
+        trigger_label = "Wait-For-Input"
+    elif has_bg_process:
+        trigger_label = "BG-Process"
+    elif has_accept_all:
+        trigger_label = "Acc-All"
+    else:
+        trigger_label = matched_trigger or "Unknown"
+
     log.info(f"Detected: '{trigger_label}'")
 
     cmd_text = extract_command_text(ocr_results)
