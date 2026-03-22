@@ -16,7 +16,7 @@ import subprocess, time, sys, os, json, signal, atexit, logging, re, unicodedata
 import ctypes
 import ctypes.wintypes
 
-VERSION = "2.1.24"
+VERSION = "2.1.25"
 
 # Enforce physical coordinates for correct window bounds and mouse_event targeting
 try:
@@ -1229,27 +1229,43 @@ def _monitor_window(win):
 
     bg_process_y = None
     has_bg_process = False
-    for r in ocr_results:
-        text = r["text"].strip().lower()
-        # Only match short standalone text entries (actual Kiro prompt bar, not chat/code)
-        if ("background process" in text and len(text) < 30) or \
-           (text == "background" and r["w"] > 0.02 and r["w"] < 0.15):
-            # VALIDATION: Must have nearby approval buttons (Run/Trust/Reject) within
-            # a similar Y-band to confirm this is an actual approval banner,
-            # not just a status label in the agent panel.
-            candidate_y = r["y"]
-            y_tolerance = 0.06  # ~6% of screen height
-            has_nearby_buttons = False
-            for r2 in ocr_results:
-                t2 = r2["text"].strip().lower()
-                if t2 in ("run", "trust", "reject", "accept all", "reject all", "▶", "►", "play"):
-                    if abs(r2["y"] - candidate_y) < y_tolerance:
-                        has_nearby_buttons = True
+    
+    # Background process banner is mutually exclusive with explicit prompts like "waiting on your input"
+    if not matched_trigger:
+        for r in ocr_results:
+            text = r["text"].strip().lower()
+            if "read" in text or "output" in text:
+                continue # Ignore the "Read background process output" chat history block
+                
+            # Only match short standalone text entries (actual Kiro prompt bar, not chat/code)
+            if ("background process" in text and len(text) < 30) or \
+               (text == "background" and r["w"] > 0.02 and r["w"] < 0.15):
+                # VALIDATION: Must have nearby approval buttons (Run/Trust/Reject) within
+                # a similar Y-band to confirm this is an actual approval banner,
+                # not just a status label in the agent panel.
+                candidate_y = r["y"]
+                
+                # Check for "read" or "output" on the exact same line to avoid splits
+                found_chat_block = False
+                for r_check in ocr_results:
+                    if abs(r_check["y"] - candidate_y) < 0.04 and ("read" in r_check["text"].lower() or "output" in r_check["text"].lower()):
+                        found_chat_block = True
                         break
-            if has_nearby_buttons:
-                bg_process_y = candidate_y
-                has_bg_process = True
-                break
+                if found_chat_block:
+                    continue
+
+                y_tolerance = 0.06  # ~6% of screen height
+                has_nearby_buttons = False
+                for r2 in ocr_results:
+                    t2 = r2["text"].strip().lower()
+                    if t2 in ("run", "trust", "reject", "accept all", "reject all", "▶", "►", "play"):
+                        if abs(r2["y"] - candidate_y) < y_tolerance:
+                            has_nearby_buttons = True
+                            break
+                if has_nearby_buttons:
+                    bg_process_y = candidate_y
+                    has_bg_process = True
+                    break
 
     ocr_sees_dialog_buttons = False
     for r in ocr_results:
