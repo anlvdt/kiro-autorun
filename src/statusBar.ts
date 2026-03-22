@@ -6,9 +6,6 @@ let approvedCount = 0;
 let blockedCount = 0;
 let lastActionTime: number | null = null;
 let startTime: number | null = null;
-let backendHealthy = true;
-let lastHeartbeatMs: number | null = null;  // timestamp (ms) of last heartbeat from Python
-let backendPid: number | null = null;       // PID of the backend process
 
 function relativeTime(ms: number): string {
     const sec = Math.floor(ms / 1000);
@@ -29,16 +26,7 @@ function uptimeStr(): string {
     return `${hr}h ${min % 60}m`;
 }
 
-function heartbeatAgeStr(): string {
-    if (!lastHeartbeatMs) { return 'no data'; }
-    const age = Date.now() - lastHeartbeatMs;
-    const sec = Math.floor(age / 1000);
-    if (sec < 5) { return '🟢 live'; }
-    if (sec < 30) { return `🟢 ${sec}s ago`; }
-    if (sec < 120) { return `🟡 ${sec}s ago`; }
-    const min = Math.floor(sec / 60);
-    return `🔴 ${min}m ago`;
-}
+
 
 export function createStatusBar(): vscode.StatusBarItem {
     statusBarItem = vscode.window.createStatusBarItem(
@@ -72,47 +60,28 @@ export function updateStatusBar(config: AutoRunConfig, running: boolean): void {
             ? ` ┊ ✓${approvedCount} ✕${blockedCount}`
             : '';
 
-        // Status icon based on heartbeat freshness
         let statusIcon = '$(zap)';
         let statusColor = '#3fb950';
-        let bgColor: vscode.ThemeColor | undefined;
-        if (!backendHealthy) {
-            statusIcon = '$(warning)';
-            statusColor = '';
-            bgColor = new vscode.ThemeColor('statusBarItem.errorBackground');
-        } else if (lastHeartbeatMs) {
-            const heartbeatAge = Date.now() - lastHeartbeatMs;
-            if (heartbeatAge > 60_000) {
-                statusIcon = '$(pulse)';
-                statusColor = '#d29922';  // yellow — stale
-            }
-        }
 
         statusBarItem.text = `${statusIcon} AutoRun ON${stats}`;
-        statusBarItem.backgroundColor = bgColor;
-        statusBarItem.color = statusColor || undefined;
+        statusBarItem.backgroundColor = undefined;
+        statusBarItem.color = statusColor;
 
         const lastStr = lastActionTime
             ? relativeTime(Date.now() - lastActionTime)
             : 'none yet';
-        const healthStr = backendHealthy ? '✓ Healthy' : '⚠ Backend lost — try restarting';
-        const pidStr = backendPid ? `PID ${backendPid}` : 'unknown';
 
         statusBarItem.tooltip = [
-            '⚡ Kiro AutoRun — Ops Monitor',
+            '⚡ Kiro AutoRun — Native Dashboard',
             '━━━━━━━━━━━━━━━━━━━━━━━━━━━━',
-            `✓ Approved: ${approvedCount}`,
-            `✕ Blocked: ${blockedCount}`,
-            `⏱ Uptime: ${uptimeStr()}`,
-            `🕐 Last action: ${lastStr}`,
+            `✓ Native Approved: ${approvedCount}`,
+            `✕ Banned / Denied: ${blockedCount}`,
+            `⏱  Uptime: ${uptimeStr()}`,
+            `🕐 Last execution: ${lastStr}`,
             '',
-            '── Backend Status ──',
-            `🔌 Status: ${healthStr}`,
-            `💓 Heartbeat: ${heartbeatAgeStr()}`,
-            `🔧 Process: ${pidStr}`,
-            '',
-            `🛡 Banned keywords: ${config.bannedKeywords.length}`,
-            `⏲ Poll interval: ${config.pollInterval}s`,
+            '── Layer 0 Info ──',
+            `🛡  Banned keywords: ${config.bannedKeywords.length}`,
+            `⏲  Poller interval: ${config.pollInterval}s`,
             '',
             'Click to disable',
         ].join('\n');
@@ -139,30 +108,6 @@ export function resetCounts(): void {
 
 export function setStartTime(): void {
     startTime = Date.now();
-}
-
-export function setBackendHealth(healthy: boolean): void {
-    backendHealthy = healthy;
-}
-
-export function isBackendHealthy(): boolean {
-    return backendHealthy;
-}
-
-export function setLastHeartbeat(timestampMs: number): void {
-    lastHeartbeatMs = timestampMs;
-}
-
-export function getLastHeartbeat(): number | null {
-    return lastHeartbeatMs;
-}
-
-export function setBackendPid(pid: number | null): void {
-    backendPid = pid;
-}
-
-export function getBackendPid(): number | null {
-    return backendPid;
 }
 
 export function disposeStatusBar(): void {

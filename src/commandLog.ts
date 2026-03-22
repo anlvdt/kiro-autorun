@@ -229,38 +229,51 @@ function getWebviewContent(): string {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Kiro AutoRun — Ops Monitor</title>
+  <title>Kiro AutoRun — Native Layer 0 Dashboard</title>
   <style>
-    /* ── Design System: Industrial Utilitarian / Terminal-Ops ── */
+    /* ── Premium Modern UI: Glassmorphism & Animations ── */
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
     :root {
-      --mono: "JetBrains Mono", "SF Mono", "Cascadia Code", "Fira Code", monospace;
+      --sans: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      --mono: 'JetBrains Mono', "SF Mono", "Cascadia Code", "Fira Code", monospace;
+      
       --bg: var(--vscode-editor-background);
       --fg: var(--vscode-editor-foreground);
       --fg-dim: var(--vscode-descriptionForeground);
-      --border: var(--vscode-panel-border);
-      --surface: var(--vscode-sideBar-background, rgba(255,255,255,0.03));
-
-      /* Signal colors */
-      --emerald: #3fb950;
-      --emerald-bg: rgba(63, 185, 80, 0.08);
-      --emerald-glow: rgba(63, 185, 80, 0.15);
-      --coral: #f85149;
-      --coral-bg: rgba(248, 81, 73, 0.08);
-      --coral-glow: rgba(248, 81, 73, 0.15);
-      --amber: #d29922;
-      --amber-bg: rgba(210, 153, 34, 0.08);
-      --cyan: #58a6ff;
+      --border: var(--vscode-panel-border, rgba(255, 255, 255, 0.1));
+      
+      /* Vibrant Core Colors */
+      --accent: #6366f1; /* Indigo */
+      --accent-grad: linear-gradient(135deg, #6366f1, #a855f7);
+      --accent-glow: rgba(99, 102, 241, 0.25);
+      
+      --emerald: #10b981;
+      --emerald-bg: rgba(16, 185, 129, 0.12);
+      
+      --coral: #ef4444;
+      --coral-bg: rgba(239, 68, 68, 0.12);
+      
+      --amber: #f59e0b;
+      --amber-bg: rgba(245, 158, 11, 0.12);
+      
+      --surface: rgba(255, 255, 255, 0.03);
+      --surface-hover: rgba(255, 255, 255, 0.06);
     }
 
     * { box-sizing: border-box; margin: 0; padding: 0; }
 
     body {
-      font-family: var(--mono);
+      font-family: var(--sans);
       color: var(--fg);
       background: var(--bg);
-      padding: 20px;
-      font-size: 12px;
+      padding: 32px;
+      font-size: 13px;
       line-height: 1.5;
+      -webkit-font-smoothing: antialiased;
+      /* Subtle radial gradient background */
+      background-image: radial-gradient(circle at 100% 0%, var(--accent-glow) 0%, transparent 40%);
+      background-attachment: fixed;
     }
 
     /* ── Header ── */
@@ -268,365 +281,412 @@ function getWebviewContent(): string {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      margin-bottom: 20px;
-      padding-bottom: 16px;
+      margin-bottom: 32px;
+      padding-bottom: 24px;
       border-bottom: 1px solid var(--border);
+      position: relative;
     }
-    .header-left {
+    .header::after {
+      content: '';
+      position: absolute;
+      bottom: -1px;
+      left: 0;
+      width: 150px;
+      height: 2px;
+      background: var(--accent-grad);
+      box-shadow: 0 0 10px var(--accent-glow);
+      border-radius: 2px;
+    }
+
+    .brand {
       display: flex;
       align-items: center;
-      gap: 10px;
+      gap: 16px;
     }
-    .logo {
-      width: 22px;
-      height: 22px;
-      color: var(--cyan);
-      flex-shrink: 0;
+    .logo-box {
+      width: 44px;
+      height: 44px;
+      border-radius: 12px;
+      background: var(--accent-grad);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 4px 16px var(--accent-glow);
+      color: white;
+    }
+    .logo-box svg { width: 24px; height: 24px; }
+    
+    .title-wrapper {
+      display: flex;
+      flex-direction: column;
     }
     .title {
-      font-size: 14px;
+      font-size: 18px;
       font-weight: 700;
-      letter-spacing: 0.5px;
-      text-transform: uppercase;
+      letter-spacing: -0.5px;
+      color: var(--fg);
     }
-    .title-sub {
-      font-size: 10px;
+    .subtitle {
+      font-size: 12px;
       color: var(--fg-dim);
-      letter-spacing: 1px;
-      text-transform: uppercase;
+      font-weight: 500;
+      letter-spacing: 0.5px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .layer-badge {
+      background: rgba(255,255,255,0.1);
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 10px;
+      font-weight: 700;
+      color: var(--fg);
+    }
+
+    /* Status Pulse */
+    .status-indicator {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      background: var(--surface);
+      padding: 8px 16px;
+      border-radius: 20px;
+      border: 1px solid var(--border);
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--emerald);
     }
     .pulse {
-      display: inline-block;
       width: 8px;
       height: 8px;
       border-radius: 50%;
       background: var(--emerald);
-      animation: pulse-glow 2s ease-in-out infinite;
+      box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.4);
+      animation: pulse-ring 2s infinite cubic-bezier(0.215, 0.61, 0.355, 1);
     }
-    @keyframes pulse-glow {
-      0%, 100% { box-shadow: 0 0 0 0 var(--emerald-glow); }
-      50% { box-shadow: 0 0 0 6px transparent; }
+    @keyframes pulse-ring {
+      0% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.4); }
+      70% { box-shadow: 0 0 0 8px rgba(16, 185, 129, 0); }
+      100% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
     }
 
-    /* ── Stats Cards ── */
+    /* ── Stats Glass Cards ── */
     .stats-grid {
       display: grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap: 12px;
-      margin-bottom: 20px;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 16px;
+      margin-bottom: 32px;
     }
     .stat-card {
-      padding: 14px 16px;
-      border: 1px solid var(--border);
-      border-radius: 6px;
+      padding: 24px;
+      border-radius: 16px;
       background: var(--surface);
+      border: 1px solid var(--border);
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      transition: transform 0.3s ease, box-shadow 0.3s ease, border-color 0.3s ease;
       position: relative;
       overflow: hidden;
-      transition: border-color 0.2s;
     }
     .stat-card:hover {
-      border-color: var(--fg-dim);
+      transform: translateY(-4px);
+      box-shadow: 0 12px 24px rgba(0, 0, 0, 0.15);
+      border-color: rgba(255, 255, 255, 0.15);
     }
+    
     .stat-card::before {
       content: '';
       position: absolute;
-      top: 0;
-      left: 0;
-      right: 0;
-      height: 2px;
+      top: 0; left: 0; right: 0;
+      height: 3px;
+      background: var(--fg-dim);
+      opacity: 0.3;
+      transition: opacity 0.3s;
     }
-    .stat-card.total::before { background: var(--cyan); }
-    .stat-card.approved::before { background: var(--emerald); }
-    .stat-card.denied::before { background: var(--coral); }
+    .stat-card.total::before { background: var(--accent-grad); opacity: 1; }
+    .stat-card.approved::before { background: var(--emerald); opacity: 1; }
+    .stat-card.denied::before { background: var(--coral); opacity: 1; }
+
     .stat-header {
       display: flex;
       align-items: center;
-      gap: 6px;
-      margin-bottom: 8px;
+      gap: 8px;
     }
     .stat-icon {
-      width: 14px;
-      height: 14px;
-      opacity: 0.5;
+      width: 18px;
+      height: 18px;
+      opacity: 0.7;
     }
+    .stat-card.total .stat-icon { color: var(--accent); }
+    .stat-card.approved .stat-icon { color: var(--emerald); }
+    .stat-card.denied .stat-icon { color: var(--coral); }
+
     .stat-label {
-      font-size: 10px;
+      font-size: 11px;
       text-transform: uppercase;
-      letter-spacing: 1.5px;
+      letter-spacing: 1px;
+      font-weight: 600;
       color: var(--fg-dim);
     }
     .stat-value {
-      font-size: 28px;
+      font-size: 36px;
       font-weight: 700;
       line-height: 1;
+      font-family: var(--sans);
+      letter-spacing: -1px;
     }
-    .stat-card.total .stat-value { color: var(--cyan); }
-    .stat-card.approved .stat-value { color: var(--emerald); }
-    .stat-card.denied .stat-value { color: var(--coral); }
 
     /* ── Controls ── */
     .controls {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      margin-bottom: 12px;
-      gap: 8px;
+      margin-bottom: 20px;
     }
     .filter-group {
-      display: flex;
-      gap: 2px;
-      background: var(--surface);
+      display: inline-flex;
+      background: rgba(0,0,0,0.2);
       border: 1px solid var(--border);
-      border-radius: 4px;
-      padding: 2px;
+      border-radius: 8px;
+      padding: 4px;
+      gap: 4px;
     }
     .filter-btn {
-      padding: 5px 12px;
+      padding: 8px 16px;
       border: none;
       background: transparent;
       color: var(--fg-dim);
-      font-family: var(--mono);
-      font-size: 11px;
+      font-family: var(--sans);
+      font-size: 12px;
+      font-weight: 600;
       cursor: pointer;
-      border-radius: 3px;
-      transition: all 0.15s;
-      letter-spacing: 0.3px;
+      border-radius: 6px;
+      transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
     }
     .filter-btn:hover {
       color: var(--fg);
-      background: rgba(255,255,255,0.05);
+      background: var(--surface-hover);
     }
     .filter-btn.active {
       color: var(--fg);
-      background: rgba(255,255,255,0.08);
+      background: var(--surface);
+      box-shadow: 0 2px 8px rgba(0,0,0,0.2);
     }
+    
     .btn-danger {
       display: inline-flex;
       align-items: center;
-      gap: 5px;
-      padding: 5px 12px;
-      border: 1px solid rgba(248, 81, 73, 0.3);
-      background: var(--coral-bg);
-      color: var(--coral);
-      font-family: var(--mono);
-      font-size: 11px;
+      gap: 6px;
+      padding: 8px 16px;
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--fg-dim);
+      font-family: var(--sans);
+      font-weight: 500;
+      font-size: 12px;
       cursor: pointer;
-      border-radius: 4px;
-      transition: all 0.15s;
-    }
-    .btn-icon {
-      width: 13px;
-      height: 13px;
+      border-radius: 8px;
+      transition: all 0.2s;
     }
     .btn-danger:hover {
-      background: rgba(248, 81, 73, 0.15);
-      border-color: var(--coral);
+      background: var(--coral-bg);
+      border-color: rgba(239, 68, 68, 0.3);
+      color: var(--coral);
     }
+    .btn-icon { width: 14px; height: 14px; }
 
-    /* ── Table ── */
-    .table-wrap {
+    /* ── Table Container ── */
+    .table-container {
+      background: var(--surface);
       border: 1px solid var(--border);
-      border-radius: 6px;
+      border-radius: 12px;
       overflow: hidden;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+      backdrop-filter: blur(10px);
     }
+    
     table {
       width: 100%;
       border-collapse: collapse;
-      font-size: 12px;
-    }
-    thead th {
       text-align: left;
-      padding: 10px 12px;
-      background: var(--surface);
+    }
+    
+    th {
+      padding: 16px 20px;
+      background: rgba(0,0,0,0.2);
       color: var(--fg-dim);
-      font-size: 10px;
+      font-size: 11px;
       font-weight: 600;
       text-transform: uppercase;
       letter-spacing: 1px;
       border-bottom: 1px solid var(--border);
     }
-    tbody tr {
-      transition: background 0.1s;
-    }
-    tbody tr:hover {
-      background: rgba(255,255,255,0.02);
-    }
+    
     td {
-      padding: 8px 12px;
-      border-bottom: 1px solid rgba(255,255,255,0.04);
+      padding: 16px 20px;
+      border-bottom: 1px solid rgba(255,255,255,0.03);
       vertical-align: middle;
+      font-family: var(--sans);
+      font-size: 13px;
     }
-    tbody tr:last-child td {
-      border-bottom: none;
+    
+    tr {
+      transition: background 0.2s;
+      animation: slideIn 0.3s ease-out forwards;
+      opacity: 0;
+      transform: translateY(10px);
     }
+    tr:nth-child(1) { animation-delay: 0.05s; }
+    tr:nth-child(2) { animation-delay: 0.1s; }
+    tr:nth-child(3) { animation-delay: 0.15s; }
+    tr:nth-child(4) { animation-delay: 0.2s; }
+    tr:nth-child(5) { animation-delay: 0.25s; }
+    tr:nth-child(n+6) { animation-delay: 0.3s; }
+    
+    @keyframes slideIn {
+      to { opacity: 1; transform: translateY(0); }
+    }
+    
+    tr:hover { background: var(--surface-hover); }
+    tr:last-child td { border-bottom: none; }
 
-    /* Column styles */
-    .col-id { width: 48px; }
-    .id-num {
-      color: var(--fg-dim);
-      font-size: 11px;
-    }
-    .col-time { width: 130px; white-space: nowrap; }
-    .time-date {
-      color: var(--fg-dim);
-      font-size: 11px;
-    }
-    .time-clock {
-      color: var(--fg);
-      margin-left: 6px;
-    }
-    .col-cmd { max-width: 350px; }
+    /* Column Specifics */
+    .col-id { width: 60px; color: var(--fg-dim); font-variant-numeric: tabular-nums; }
+    .col-time { width: 140px; }
+    .time-date { color: var(--fg-dim); font-size: 12px; display: block; margin-bottom: 2px; }
+    .time-clock { color: var(--fg); font-variant-numeric: tabular-nums; font-family: var(--mono); font-size: 11px;}
+    
+    .col-cmd { max-width: 400px; }
     .cmd-wrap {
-      display: flex;
+      display: inline-flex;
       align-items: center;
-      gap: 6px;
+      gap: 8px;
     }
     .cmd-wrap code {
-      background: rgba(255,255,255,0.05);
-      padding: 3px 8px;
-      border-radius: 3px;
+      font-family: var(--mono);
       font-size: 12px;
-      word-break: break-all;
-      border: 1px solid rgba(255,255,255,0.06);
-    }
-    .copy-btn {
-      background: none;
-      border: 1px solid transparent;
-      cursor: pointer;
-      font-size: 13px;
-      padding: 2px 5px;
-      opacity: 0.3;
-      transition: all 0.15s;
-      border-radius: 3px;
       color: var(--fg);
-      position: relative;
-      flex-shrink: 0;
+      background: rgba(0,0,0,0.2);
+      padding: 6px 10px;
+      border-radius: 6px;
+      border: 1px solid rgba(255,255,255,0.05);
+      word-break: break-all;
     }
-    .copy-btn:hover {
-      opacity: 0.8;
-      border-color: var(--border);
+    
+    .copy-btn {
       background: rgba(255,255,255,0.05);
+      border: 1px solid transparent;
+      border-radius: 6px;
+      padding: 6px;
+      color: var(--fg-dim);
+      cursor: pointer;
+      transition: all 0.2s;
+      display: flex;
+      align-items: center;
+      justify-content: center;
     }
-    .copy-btn .copy-icon,
-    .copy-btn .copy-done {
-      width: 14px;
-      height: 14px;
-      display: block;
-    }
-    .copy-btn .copy-done {
-      display: none;
-      color: var(--emerald);
-    }
+    .copy-btn:hover { background: rgba(255,255,255,0.1); color: var(--fg); transform: scale(1.05); }
+    .copy-btn:active { transform: scale(0.95); }
+    .copy-icon, .copy-done { width: 14px; height: 14px; }
+    .copy-done { display: none; color: var(--emerald); }
     .copy-btn.copied .copy-icon { display: none; }
     .copy-btn.copied .copy-done { display: block; }
-    .copy-btn.copied { opacity: 1; }
+    .copy-btn.copied { background: var(--emerald-bg); border-color: rgba(16, 185, 129, 0.3); }
 
-    .col-status { width: 110px; }
+    .col-status { width: 140px; }
     .badge {
       display: inline-flex;
       align-items: center;
-      gap: 5px;
-      padding: 3px 10px;
-      border-radius: 3px;
-      font-size: 10px;
-      font-weight: 600;
-      letter-spacing: 0.8px;
-      text-transform: uppercase;
-    }
-    .badge-icon {
-      width: 12px;
-      height: 12px;
-      flex-shrink: 0;
-    }
-    .badge-icon-ok { color: var(--emerald); }
-    .badge-icon-deny { color: var(--coral); }
-    .badge-icon-manual { color: var(--amber); }
-    .badge-auto-approved {
-      background: var(--emerald-bg);
-      color: var(--emerald);
-      border: 1px solid rgba(63, 185, 80, 0.2);
-    }
-    .badge-denied {
-      background: var(--coral-bg);
-      color: var(--coral);
-      border: 1px solid rgba(248, 81, 73, 0.2);
-    }
-    .badge-manual {
-      background: var(--amber-bg);
-      color: var(--amber);
-      border: 1px solid rgba(210, 153, 34, 0.2);
-    }
-    .col-reason {
-      color: var(--fg-dim);
+      gap: 6px;
+      padding: 6px 12px;
+      border-radius: 20px;
       font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
     }
+    .badge-icon { width: 14px; height: 14px; }
+    .badge-auto-approved { background: var(--emerald-bg); color: var(--emerald); border: 1px solid rgba(16, 185, 129, 0.2); }
+    .badge-denied { background: var(--coral-bg); color: var(--coral); border: 1px solid rgba(239, 68, 68, 0.2); }
+    .badge-manual { background: var(--amber-bg); color: var(--amber); border: 1px solid rgba(245, 158, 11, 0.2); }
+
+    .col-reason { color: var(--fg-dim); line-height: 1.4; }
 
     /* ── Empty State ── */
     .empty-state {
       text-align: center;
-      padding: 60px 20px;
+      padding: 80px 20px;
+      background: var(--surface);
+      border: 1px dashed var(--border);
+      border-radius: 12px;
+      margin-top: 20px;
     }
     .empty-icon {
-      width: 64px;
-      height: 64px;
-      color: var(--fg-dim);
-      opacity: 0.25;
-      margin-bottom: 16px;
+      width: 48px;
+      height: 48px;
+      color: var(--accent);
+      opacity: 0.5;
+      margin-bottom: 20px;
+      filter: drop-shadow(0 0 10px var(--accent-glow));
     }
     .empty-title {
-      font-size: 14px;
+      font-size: 16px;
       font-weight: 600;
-      color: var(--fg-dim);
-      opacity: 0.6;
-      margin-bottom: 4px;
-      text-transform: uppercase;
-      letter-spacing: 1px;
+      color: var(--fg);
+      margin-bottom: 8px;
     }
     .empty-hint {
       color: var(--fg-dim);
-      font-size: 11px;
-      opacity: 0.4;
+      font-size: 13px;
     }
 
-    /* ── Row filter animation ── */
-    .row.hidden {
-      display: none;
-    }
+    /* Filter hiding */
+    .row.hidden { display: none; }
   </style>
 </head>
 <body>
   <div class="header">
-    <div class="header-left">
-      <svg class="logo" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-        <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/>
-      </svg>
-      <div>
-        <div class="title">Kiro AutoRun</div>
-        <div class="title-sub">Ops Monitor</div>
+    <div class="brand">
+      <div class="logo-box">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
+        </svg>
+      </div>
+      <div class="title-wrapper">
+        <div class="title">Native API Dashboard</div>
+        <div class="subtitle">
+           <span class="layer-badge">Layer 0</span> TS Execution Active • No OCR Tracking
+        </div>
       </div>
     </div>
-    <span class="pulse" title="Monitoring active"></span>
+    <div class="status-indicator">
+      <span class="pulse"></span> Auto-Approver Listening
+    </div>
   </div>
 
   <div class="stats-grid">
     <div class="stat-card total">
       <div class="stat-header">
-        <svg class="stat-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><rect x="2" y="3" width="12" height="10" rx="1.5"/><path d="M5 1v3M11 1v3M2 7h12"/></svg>
-        <div class="stat-label">Total Commands</div>
+        <svg class="stat-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line></svg>
+        <span class="stat-label">Total Execution Ops</span>
       </div>
       <div class="stat-value">${entries.length}</div>
     </div>
     <div class="stat-card approved">
       <div class="stat-header">
-        <svg class="stat-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6"/><path d="M5.5 8l2 2 3.5-3.5"/></svg>
-        <div class="stat-label">Approved</div>
+        <svg class="stat-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline></svg>
+        <span class="stat-label">Native Approved</span>
       </div>
       <div class="stat-value">${approvedCount}</div>
     </div>
     <div class="stat-card denied">
       <div class="stat-header">
-        <svg class="stat-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6"/><path d="M5.5 5.5l5 5M10.5 5.5l-5 5"/></svg>
-        <div class="stat-label">Denied</div>
+        <svg class="stat-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><line x1="15" y1="9" x2="9" y2="15"></line><line x1="9" y1="9" x2="15" y2="15"></line></svg>
+        <span class="stat-label">Banned / Denied</span>
       </div>
       <div class="stat-value">${deniedCount}</div>
     </div>
@@ -635,23 +695,26 @@ function getWebviewContent(): string {
   ${entries.length === 0 ? emptyState : `
   <div class="controls">
     <div class="filter-group">
-      <button class="filter-btn active" data-filter="all" onclick="filterRows('all', this)">ALL</button>
-      <button class="filter-btn" data-filter="auto-approved" onclick="filterRows('auto-approved', this)">APPROVED</button>
-      <button class="filter-btn" data-filter="denied" onclick="filterRows('denied', this)">DENIED</button>
-      ${manualCount > 0 ? '<button class="filter-btn" data-filter="manual" onclick="filterRows(\'manual\', this)">MANUAL</button>' : ''}
+      <button class="filter-btn active" data-filter="all" onclick="filterRows('all', this)">All Ops</button>
+      <button class="filter-btn" data-filter="auto-approved" onclick="filterRows('auto-approved', this)">Approved</button>
+      <button class="filter-btn" data-filter="denied" onclick="filterRows('denied', this)">Denied</button>
+      ${manualCount > 0 ? '<button class="filter-btn" data-filter="manual" onclick="filterRows(\'manual\', this)">Manual</button>' : ''}
     </div>
-    <button class="btn-danger" onclick="clearAll()"><svg class="btn-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M3 4h10M6 4V2.5A.5.5 0 016.5 2h3a.5.5 0 01.5.5V4M4.5 4l.7 9.5a1 1 0 001 .9h3.6a1 1 0 001-.9L11.5 4"/></svg> Clear</button>
+    <button class="btn-danger" onclick="clearAll()">
+      <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg>
+      Clear Log
+    </button>
   </div>
 
-  <div class="table-wrap">
+  <div class="table-container">
     <table>
       <thead>
         <tr>
-          <th>#</th>
-          <th>Time</th>
-          <th>Command</th>
-          <th>Status</th>
-          <th>Reason</th>
+          <th>ID</th>
+          <th>Timestamp</th>
+          <th>Execution Command</th>
+          <th>Resolution</th>
+          <th>Detail</th>
         </tr>
       </thead>
       <tbody>${rows}</tbody>
@@ -665,21 +728,19 @@ function getWebviewContent(): string {
     function copyCmd(btn, text) {
       vscode.postMessage({ command: 'copy', text: text });
       btn.classList.add('copied');
-      setTimeout(() => btn.classList.remove('copied'), 1500);
+      setTimeout(() => btn.classList.remove('copied'), 2000);
     }
 
     function clearAll() {
-      if (confirm('Clear all command history?')) {
+      if (confirm('Clear all native execution history?')) {
         vscode.postMessage({ command: 'clear' });
       }
     }
 
     function filterRows(status, btn) {
-      // Update active button
       document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
 
-      // Filter rows
       document.querySelectorAll('.row').forEach(row => {
         if (status === 'all' || row.dataset.status === status) {
           row.classList.remove('hidden');

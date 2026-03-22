@@ -2,7 +2,7 @@
   "name": "kiro-autorun",
   "displayName": "Kiro AutoRun",
   "description": "Auto-clicks Run/Accept All for Kiro IDE prompts with banned-keyword safety (macOS + Windows)",
-  "version": "2.1.25",
+  "version": "2.2.0",
   "publisher": "ANLE",
   "icon": "icon.png",
   "repository": {
@@ -68,6 +68,14 @@
       {
         "command": "kiroAutorun.checkStatus",
         "title": "Kiro AutoRun: Check Backend Status"
+      },
+      {
+        "command": "kiroAutorun.dumpCommands",
+        "title": "Kiro AutoRun: Dump Available Commands (Discovery)"
+      },
+      {
+        "command": "kiroAutorun.debugState",
+        "title": "Kiro AutoRun: Debug Kiro State"
       }
     ],
     "configuration": {
@@ -84,26 +92,6 @@
           "minimum": 1,
           "maximum": 30,
           "description": "Seconds between each screen check"
-        },
-        "kiroAutorun.targetApp": {
-          "type": "string",
-          "default": "Kiro",
-          "description": "Process name of the target IDE"
-        },
-        "kiroAutorun.triggerText": {
-          "type": "string",
-          "default": "waiting on your input",
-          "description": "Legacy: single trigger text for auto-approval detection (OCR). Use triggerTexts for multiple."
-        },
-        "kiroAutorun.triggerTexts": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": [
-            "waiting on your input"
-          ],
-          "markdownDescription": "**Trigger texts** (OCR). If ANY of these appear on Kiro's window, auto-click is triggered. The extension also auto-detects `Accept All` / `Reject All` buttons (Kiro v0.8+)."
         },
         "kiroAutorun.bannedKeywords": {
           "type": "array",
@@ -140,22 +128,7 @@
             "killall",
             ":(){:|:&};:"
           ],
-          "markdownDescription": "**Banned keywords**. If ANY of these appear on screen when Kiro asks for input, auto-click is BLOCKED."
-        },
-        "kiroAutorun.showNotification": {
-          "type": "boolean",
-          "default": false,
-          "description": "Show macOS notifications on auto-click/block"
-        },
-        "kiroAutorun.notificationSound": {
-          "type": "boolean",
-          "default": true,
-          "markdownDescription": "**Play a sound** when Kiro is waiting for input and auto-click is blocked (banned keyword). Helps when you're away from screen. ([Issue #308](https://github.com/kirodotdev/Kiro/issues/308))"
-        },
-        "kiroAutorun.stuckRecoveryEnabled": {
-          "type": "boolean",
-          "default": true,
-          "markdownDescription": "**Stuck recovery**: when 'Waiting on your input' is detected for ~10 seconds with no clickable button, press Escape to dismiss stuck overlay. ([Issue #2146](https://github.com/kirodotdev/Kiro/issues/2146))"
+          "markdownDescription": "**Banned keywords**. If ANY of these appear in Kiro's command, auto-execution is BLOCKED."
         }
       }
     }
