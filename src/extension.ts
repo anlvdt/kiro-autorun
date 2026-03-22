@@ -4,22 +4,32 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as crypto from 'crypto';
 import { exec, spawn } from 'child_process';
-import { getConfig, setConfigValue, writeConfigFile, onConfigChange, ACTION_LOG_FILE } from './config';
+import { getConfig, setConfigValue, writeConfigFile, onConfigChange, ACTION_LOG_FILE, CONFIG_DIR } from './config';
 import {
     createStatusBar, updateStatusBar, disposeStatusBar,
     resetCounts, incrementApproved, incrementBlocked,
     setStartTime, setBackendHealth, isBackendHealthy,
+    setLastHeartbeat, getLastHeartbeat, setBackendPid,
 } from './statusBar';
 import { loadLog, addEntry, showLogPanel, clearLog } from './commandLog';
 import { applyKiroSettings, setFullAutonomy, addTrustedPattern } from './kiroSettings';
 
 let outputChannel: vscode.OutputChannel;
 let isRunning = false;
+let isBackendOwner = false;  // true if THIS window spawned the backend
 let actionLogWatcher: ReturnType<typeof setInterval> | undefined;
 let actionLogFsWatcher: fs.FSWatcher | undefined;
 let lastActionLogSize = 0;
 let lastActionLogLines = 0;
 let healthCheckInterval: ReturnType<typeof setInterval> | undefined;
+let heartbeatPollInterval: ReturnType<typeof setInterval> | undefined;
+
+const PID_FILE = path.join(CONFIG_DIR, 'backend.pid');
+const HEARTBEAT_FILE = path.join(CONFIG_DIR, 'heartbeat');
+
+let restartAttempts: { time: number }[] = [];  // Track restart attempts for backoff
+const MAX_RESTARTS_IN_WINDOW = 3;
+const RESTART_WINDOW_MS = 5 * 60 * 1000; // 5 minutes
 
 /**
  * Get the path to the bundled Python script for the current platform
@@ -46,16 +56,95 @@ function isWindows(): boolean {
 }
 
 /**
- * Start the Python backend via external Terminal.app.
- * Terminal.app already has Accessibility + Screen Recording permissions.
+ * Check if a Python backend process is already running.
+ * Uses PowerShell/pgrep to search by script name — more reliable than PID file on Windows.
+ * Returns a Promise that resolves to the PID (number) if found, or null otherwise.
  */
-function startBackend(context: vscode.ExtensionContext): void {
+function checkBackendProcessAlive(): Promise<number | null> {
+    return new Promise((resolve) => {
+        if (isWindows()) {
+            const checkCmd = `powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { ($_.Name -eq 'python.exe' -or $_.Name -eq 'pythonw.exe') -and $_.CommandLine -like '*kiro-autorun-win*' } | Select-Object -First 1 -ExpandProperty ProcessId"`;
+            exec(checkCmd, (err, stdout) => {
+                const output = stdout?.trim() || '';
+                const match = output.split('\n').find(l => /^\d+/.test(l.trim()));
+                if (match) {
+                    const pid = parseInt(match.trim(), 10);
+                    outputChannel?.appendLine(`   Backend process found (PID: ${pid})`);
+                    resolve(pid);
+                } else {
+                    resolve(null);
+                }
+            });
+        } else {
+            exec('pgrep -f kiro-autorun-v3.py', (err, stdout) => {
+                const output = stdout?.trim() || '';
+                if (!err && output.length > 0) {
+                    const pid = parseInt(output.split('\n')[0].trim(), 10);
+                    resolve(isNaN(pid) ? 1 : pid); // fallback to 1 if NaN but process exists
+                } else {
+                    resolve(null);
+                }
+            });
+        }
+    });
+}
+
+/**
+ * Write PID file for the backend process.
+ */
+function writePidFile(pid: number): void {
+    try {
+        if (!fs.existsSync(CONFIG_DIR)) {
+            fs.mkdirSync(CONFIG_DIR, { recursive: true });
+        }
+        fs.writeFileSync(PID_FILE, pid.toString(), 'utf-8');
+    } catch {
+        // ignore
+    }
+}
+
+/**
+ * Remove PID file.
+ */
+function removePidFile(): void {
+    try {
+        if (fs.existsSync(PID_FILE)) {
+            fs.unlinkSync(PID_FILE);
+        }
+    } catch {
+        // ignore
+    }
+}
+
+/**
+ * Start the Python backend.
+ * Uses process-name check to ensure only one backend runs across all windows.
+ */
+async function startBackend(context: vscode.ExtensionContext): Promise<void> {
     if (isRunning) {
         return;
     }
 
     if (!isMacOS() && !isWindows()) {
         outputChannel.appendLine('[WARN] Backend not available on this platform — Layer 1 (Settings API) still active');
+        return;
+    }
+
+    // Check if a backend is already running (from another window)
+    const existingPid = await checkBackendProcessAlive();
+    if (existingPid !== null) {
+        outputChannel.appendLine('Backend already running — attaching as observer');
+        isRunning = true;
+        isBackendOwner = false;
+        
+        setBackendPid(existingPid);
+        
+        setStartTime();
+        setBackendHealth(true);
+        updateStatusBar(getConfig(), true);
+        startActionLogWatcher();
+        startHealthCheck(context);
+        startHeartbeatPoll();
         return;
     }
 
@@ -90,7 +179,26 @@ function startBackend(context: vscode.ExtensionContext): void {
     outputChannel.appendLine('Launching AutoRun backend...');
     outputChannel.appendLine(`   Script: ${scriptPath}`);
 
-    let child: ReturnType<typeof spawn>;
+    // Check restart backoff — prevent rapid restart loops
+    const now = Date.now();
+    restartAttempts = restartAttempts.filter(a => now - a.time < RESTART_WINDOW_MS);
+    if (restartAttempts.length >= MAX_RESTARTS_IN_WINDOW) {
+        outputChannel.appendLine(`[ERROR] Backend restarted ${restartAttempts.length} times in 5 min — stopping auto-restart`);
+        vscode.window.showErrorMessage(
+            `AutoRun: Backend keeps crashing (${restartAttempts.length} restarts in 5 min). Check Python backend log.`,
+            'Show Log', 'Restart Anyway'
+        ).then((choice) => {
+            if (choice === 'Show Log') { outputChannel.show(); }
+            if (choice === 'Restart Anyway') {
+                restartAttempts = [];
+                startBackend(context);
+            }
+        });
+        return;
+    }
+    restartAttempts.push({ time: now });
+
+    let child: ReturnType<typeof spawn> | undefined;
 
     if (isWindows()) {
         // Windows: spawn pythonw (no console window) or python
@@ -100,6 +208,7 @@ function startBackend(context: vscode.ExtensionContext): void {
             fs.mkdirSync(logDir, { recursive: true });
         }
         const logFd = fs.openSync(logFile, 'a');
+        outputChannel.appendLine('   Trying pythonw...');
         try {
             child = spawn('pythonw', [scriptPath], {
                 detached: true,
@@ -107,8 +216,11 @@ function startBackend(context: vscode.ExtensionContext): void {
                 env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1' },
                 windowsHide: true,
             });
-        } catch {
+            outputChannel.appendLine(`   pythonw spawned (PID: ${child?.pid || 'none'})`);
+        } catch (e1) {
+            outputChannel.appendLine(`   pythonw failed: ${e1}`);
             // pythonw not found, try python
+            outputChannel.appendLine('   Trying python...');
             try {
                 child = spawn('python', [scriptPath], {
                     detached: true,
@@ -116,12 +228,13 @@ function startBackend(context: vscode.ExtensionContext): void {
                     env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1' },
                     windowsHide: true,
                 });
-            } finally {
-                // handled below
+                outputChannel.appendLine(`   python spawned (PID: ${child?.pid || 'none'})`);
+            } catch (e2) {
+                outputChannel.appendLine(`[ERROR] Both pythonw and python failed: ${e2}`);
             }
-        } finally {
-            fs.closeSync(logFd);
         }
+        // Close fd after spawn — detached child already inherited a copy
+        try { fs.closeSync(logFd); } catch { /* ignore */ }
     } else {
         // macOS: Set LSUIElement to hide Python Dock icon
         exec('defaults write org.python.python LSUIElement -bool true 2>/dev/null');
@@ -133,25 +246,80 @@ function startBackend(context: vscode.ExtensionContext): void {
                 stdio: ['ignore', logFd, logFd],
                 env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1' },
             });
-        } finally {
-            fs.closeSync(logFd);
+        } catch (e3) {
+            outputChannel.appendLine(`[ERROR] python3 spawn failed: ${e3}`);
         }
+        // Close fd after spawn — detached child already inherited a copy
+        try { fs.closeSync(logFd); } catch { /* ignore */ }
     }
+
+    if (!child) {
+        outputChannel.appendLine('[ERROR] Failed to spawn Python backend — no python executable found');
+        vscode.window.showErrorMessage(
+            'AutoRun: Could not start backend. Install Python3 (python/pythonw must be in PATH).',
+            'Show Log'
+        ).then((s) => { if (s) { outputChannel.show(); } });
+        return;
+    }
+
+    // Listen for spawn errors (e.g., ENOENT, permission denied)
+    child.on('error', (err) => {
+        outputChannel.appendLine(`[ERROR] Backend process error: ${err.message}`);
+        isRunning = false;
+        setBackendHealth(false);
+        updateStatusBar(getConfig(), false);
+    });
+
+    // Listen for unexpected early exit (crash on startup)
+    const spawnedPid = child.pid;
+    child.on('exit', (code, signal) => {
+        outputChannel.appendLine(`[WARN] Backend exited (code: ${code}, signal: ${signal}, PID: ${spawnedPid})`);
+        isRunning = false;
+        isBackendOwner = false;
+        setBackendPid(null);
+        setBackendHealth(false);
+        updateStatusBar(getConfig(), false);
+    });
 
     child.unref(); // Allow Kiro to exit without waiting for Python
 
     if (child.pid) {
         isRunning = true;
+        isBackendOwner = true;
+        writePidFile(child.pid);
+        setBackendPid(child.pid);
         setStartTime();
         setBackendHealth(true);
         updateStatusBar(config, true);
         outputChannel.appendLine(`Backend running (PID: ${child.pid}). Log: ${getBackendLogPath()}`);
         startActionLogWatcher();
         startHealthCheck(context);
+        startHeartbeatPoll();
+
+        // Post-spawn verification: check process is still alive after 5 seconds
+        // (catches immediate crashes that child.on('exit') might miss due to detach)
+        setTimeout(() => {
+            checkBackendProcessAlive().then((alive) => {
+                if (!alive && isRunning) {
+                    outputChannel.appendLine('[ERROR] Backend died within 5s of spawn — check backend.log for errors');
+                    isRunning = false;
+                    isBackendOwner = false;
+                    setBackendPid(null);
+                    setBackendHealth(false);
+                    updateStatusBar(getConfig(), false);
+                    vscode.window.showErrorMessage(
+                        'AutoRun: Backend crashed on startup. Check Output log for details.',
+                        'Show Log'
+                    ).then((s) => { if (s) { outputChannel.show(); } });
+                } else if (alive) {
+                    outputChannel.appendLine(`Backend confirmed alive after 5s (PID: ${child?.pid})`);
+                }
+            });
+        }, 5000);
     } else {
-        outputChannel.appendLine('[ERROR] Failed to spawn Python backend');
+        outputChannel.appendLine('[ERROR] spawn returned no PID — backend may not be running');
         vscode.window.showErrorMessage(
-            'AutoRun: Could not start backend. Check Python3 is installed.',
+            'AutoRun: Backend started but no PID returned. Check Python3 installation.',
             'Show Log'
         ).then((s) => { if (s) { outputChannel.show(); } });
     }
@@ -163,21 +331,30 @@ function startBackend(context: vscode.ExtensionContext): void {
 function stopBackend(): void {
     stopActionLogWatcher();
     stopHealthCheck();
+    stopHeartbeatPoll();
 
     if (isRunning) {
-        if (isWindows()) {
-            // Windows: kill python process by script name using PowerShell
-            exec('powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like \'*kiro-autorun-win*\' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"', () => {
-                outputChannel.appendLine('Backend stopped');
-            });
+        // Only kill the backend if THIS window owns it
+        if (isBackendOwner) {
+            if (isWindows()) {
+                // Windows: kill python process by script name using PowerShell
+                exec('powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like \'*kiro-autorun-win*\' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"', () => {
+                    outputChannel.appendLine('Backend stopped');
+                });
+            } else {
+                // macOS: Kill the python process
+                exec('pkill -f kiro-autorun-v3.py', () => {
+                    outputChannel.appendLine('Backend stopped');
+                });
+            }
+            removePidFile();
         } else {
-            // macOS: Kill the python process
-            exec('pkill -f kiro-autorun-v3.py', () => {
-                outputChannel.appendLine('Backend stopped');
-            });
+            outputChannel.appendLine('Detached from backend (owned by another window)');
         }
         isRunning = false;
+        isBackendOwner = false;
     }
+    setBackendPid(null);
     setBackendHealth(false); // Mark as not healthy when stopped
     updateStatusBar(getConfig(), false);
 }
@@ -240,56 +417,115 @@ function getBackendLogPath(): string {
     return '/tmp/kiro-autorun.log';
 }
 
-const HEALTH_TIMEOUT_MS = 300_000; // 300s (5 min) without log update = backend lost
-                                    // Python only logs when Kiro shows a prompt, so 60s was far too short
+const HEALTH_TIMEOUT_MS = 120_000; // 120s (2 min) without heartbeat = backend lost
+                                    // Heartbeat writes every cycle (~1-3s), so 2 min is very generous
 
 /**
- * Start backend health monitoring
+ * Start backend health monitoring.
+ * Reads heartbeat file (written every cycle by Python) for accurate alive detection.
+ * Falls back to backend.log mtime if heartbeat file not found (old Python version).
  */
 function startHealthCheck(context: vscode.ExtensionContext): void {
     stopHealthCheck();
     healthCheckInterval = setInterval(() => {
         if (!isRunning) { return; }
-        const backendLog = getBackendLogPath();
+
         try {
-            if (fs.existsSync(backendLog)) {
-                const stat = fs.statSync(backendLog);
-                const age = Date.now() - stat.mtimeMs;
-                const wasHealthy = isBackendHealthy();
-                if (age > HEALTH_TIMEOUT_MS) {
-                    // Log is stale — verify the Python process is actually dead
-                    const scriptName = isWindows() ? 'kiro-autorun-win' : 'kiro-autorun-v3.py';
-                    const checkCmd = isWindows()
-                        ? `powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*${scriptName}*' } | Select-Object -ExpandProperty ProcessId"`
-                        : `pgrep -f ${scriptName}`;
-
-                    exec(checkCmd, (err, stdout) => {
-                        const output = stdout?.trim() || '';
-                        const processAlive = isWindows()
-                            ? output.split('\n').filter(l => /^\d+/.test(l.trim())).length > 0
-                            : !err && output.length > 0;
-
-                        if (processAlive) {
-                            setBackendHealth(true);
-                        } else {
-                            setBackendHealth(false);
-                            if (wasHealthy) {
-                                outputChannel.appendLine(`[WARN] Backend process died (log stale ${Math.round(age / 1000)}s) — auto-restarting...`);
-                            }
-                            isRunning = false;
-                            startBackend(context);
-                        }
-                        updateStatusBar(getConfig(), isRunning);
-                    });
-                } else {
-                    setBackendHealth(true);
-                    updateStatusBar(getConfig(), isRunning);
+            // Primary: check heartbeat file (Python writes timestamp every cycle)
+            let lastAliveMs = 0;
+            if (fs.existsSync(HEARTBEAT_FILE)) {
+                const content = fs.readFileSync(HEARTBEAT_FILE, 'utf-8').trim();
+                const ts = parseFloat(content);
+                if (!isNaN(ts)) {
+                    lastAliveMs = ts * 1000; // Python time.time() is in seconds
                 }
+            }
+
+            // Fallback: backend.log mtime (for older Python versions without heartbeat)
+            if (lastAliveMs === 0) {
+                const backendLog = getBackendLogPath();
+                if (fs.existsSync(backendLog)) {
+                    lastAliveMs = fs.statSync(backendLog).mtimeMs;
+                }
+            }
+
+            if (lastAliveMs === 0) { return; } // No data yet
+
+            const age = Date.now() - lastAliveMs;
+            const wasHealthy = isBackendHealthy();
+
+            if (age > HEALTH_TIMEOUT_MS) {
+                // Heartbeat is stale — verify the Python process is actually dead
+                checkBackendProcessAlive().then((processAlive) => {
+                    if (processAlive) {
+                        setBackendHealth(true);
+                    } else {
+                        setBackendHealth(false);
+                        isRunning = false;
+                        isBackendOwner = false;
+
+                        if (wasHealthy) {
+                            outputChannel.appendLine(`[WARN] Backend process died (heartbeat stale ${Math.round(age / 1000)}s) — auto-restarting...`);
+                        }
+                        // Re-run startBackend — it will check restart backoff
+                        startBackend(context);
+                    }
+                    updateStatusBar(getConfig(), isRunning);
+                });
+            } else {
+                setBackendHealth(true);
+                updateStatusBar(getConfig(), isRunning);
             }
         } catch {
             // ignore
         }
     }, 30_000); // Check every 30s
+}
+
+/**
+ * Read heartbeat timestamp from file.
+ * Returns timestamp in ms, or 0 if unavailable.
+ */
+function readHeartbeat(): number {
+    try {
+        if (fs.existsSync(HEARTBEAT_FILE)) {
+            const content = fs.readFileSync(HEARTBEAT_FILE, 'utf-8').trim();
+            const ts = parseFloat(content);
+            if (!isNaN(ts)) {
+                return ts * 1000; // Python time.time() is in seconds
+            }
+        }
+    } catch { /* ignore */ }
+    return 0;
+}
+
+/**
+ * Start polling heartbeat file every 10s to update status bar in real-time.
+ * This is separate from health check (30s) — purpose is UI freshness.
+ */
+function startHeartbeatPoll(): void {
+    stopHeartbeatPoll();
+    // Read immediately
+    const hb = readHeartbeat();
+    if (hb > 0) { setLastHeartbeat(hb); }
+    updateStatusBar(getConfig(), isRunning);
+
+    heartbeatPollInterval = setInterval(() => {
+        if (!isRunning) { return; }
+        const hb = readHeartbeat();
+        if (hb > 0) { setLastHeartbeat(hb); }
+        updateStatusBar(getConfig(), isRunning);
+    }, 10_000); // Every 10s
+}
+
+/**
+ * Stop heartbeat polling
+ */
+function stopHeartbeatPoll(): void {
+    if (heartbeatPollInterval) {
+        clearInterval(heartbeatPollInterval);
+        heartbeatPollInterval = undefined;
+    }
 }
 
 /**
@@ -440,7 +676,7 @@ function cleanupTempFiles(): void {
 /**
  * Extension activation
  */
-export function activate(context: vscode.ExtensionContext): void {
+export async function activate(context: vscode.ExtensionContext): Promise<void> {
     outputChannel = vscode.window.createOutputChannel('Kiro AutoRun');
     context.subscriptions.push(outputChannel);
 
@@ -573,13 +809,35 @@ export function activate(context: vscode.ExtensionContext): void {
         })
     );
 
-    // Restart backend (stop + start)
+    // Restart backend (force-kill + start fresh)
     context.subscriptions.push(
         vscode.commands.registerCommand('kiroAutorun.restart', () => {
-            outputChannel.appendLine('Restarting backend...');
-            stopBackend();
+            outputChannel.appendLine('Restarting backend (force-kill)...');
+
+            // Always force-kill ALL backend processes, regardless of ownership
+            stopActionLogWatcher();
+            stopHealthCheck();
+            stopHeartbeatPoll();
+
+            if (isWindows()) {
+                exec('powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like \'*kiro-autorun-win*\' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"', () => {
+                    outputChannel.appendLine('Old backend killed');
+                });
+            } else {
+                exec('pkill -f kiro-autorun-v3.py', () => {
+                    outputChannel.appendLine('Old backend killed');
+                });
+            }
+            removePidFile();
+            isRunning = false;
+            isBackendOwner = false;
+            setBackendPid(null);
+            setBackendHealth(false);
             resetCounts();
-            // Small delay to ensure process is killed before restart
+            restartAttempts = []; // Reset backoff for explicit restart
+            updateStatusBar(getConfig(), false);
+
+            // Wait 1.5s for PowerShell kill to complete before spawning new
             setTimeout(() => {
                 const cfg = getConfig();
                 if (cfg.enabled) {
@@ -588,7 +846,7 @@ export function activate(context: vscode.ExtensionContext): void {
                 } else {
                     vscode.window.showInformationMessage('AutoRun is disabled. Enable it first.');
                 }
-            }, 500);
+            }, 1500);
         })
     );
 
@@ -596,6 +854,53 @@ export function activate(context: vscode.ExtensionContext): void {
     context.subscriptions.push(
         vscode.commands.registerCommand('kiroAutorun.reloadWindow', () => {
             vscode.commands.executeCommand('workbench.action.reloadWindow');
+        })
+    );
+
+    // Check backend status
+    context.subscriptions.push(
+        vscode.commands.registerCommand('kiroAutorun.checkStatus', async () => {
+            const processAlive = await checkBackendProcessAlive();
+            const hb = readHeartbeat();
+            const hbAge = hb > 0 ? Math.round((Date.now() - hb) / 1000) : -1;
+            const logPath = getBackendLogPath();
+            let logAge = -1;
+            try {
+                if (fs.existsSync(logPath)) {
+                    logAge = Math.round((Date.now() - fs.statSync(logPath).mtimeMs) / 1000);
+                }
+            } catch { /* ignore */ }
+
+            const lines = [
+                `Backend Process: ${processAlive ? '✅ RUNNING' : '❌ NOT RUNNING'}`,
+                `Extension State: ${isRunning ? 'Active' : 'Inactive'} (owner: ${isBackendOwner ? 'yes' : 'no'})`,
+                `Heartbeat: ${hbAge >= 0 ? `${hbAge}s ago` : 'no heartbeat file'}`,
+                `Log last modified: ${logAge >= 0 ? `${logAge}s ago` : 'no log file'}`,
+                `Health: ${isBackendHealthy() ? '✓ Healthy' : '⚠ Unhealthy'}`,
+            ];
+
+            outputChannel.appendLine('\n── Backend Status Check ──');
+            lines.forEach(l => outputChannel.appendLine(`  ${l}`));
+            outputChannel.appendLine('──────────────────────────');
+            outputChannel.show();
+
+            if (!processAlive && isRunning) {
+                const choice = await vscode.window.showWarningMessage(
+                    'Backend process is NOT running!',
+                    'Restart', 'Dismiss'
+                );
+                if (choice === 'Restart') {
+                    stopBackend();
+                    resetCounts();
+                    setTimeout(() => startBackend(context), 500);
+                }
+            } else if (processAlive) {
+                vscode.window.showInformationMessage(
+                    `AutoRun backend is running (heartbeat: ${hbAge >= 0 ? hbAge + 's ago' : 'N/A'})`
+                );
+            } else {
+                vscode.window.showInformationMessage('AutoRun is not running. Click status bar to enable.');
+            }
         })
     );
 
@@ -607,27 +912,71 @@ export function activate(context: vscode.ExtensionContext): void {
         })
     );
 
-    // Auto-start Layer 2 (backend) if enabled and on macOS
-    if (config.enabled) {
-        startBackend(context);
+    // Force-restart backend on version change OR Python script change
+    const currentVersion = context.extension.packageJSON.version;
+    const versionFile = path.join(CONFIG_DIR, 'ext.version');
+    const scriptHashFile = path.join(CONFIG_DIR, 'script.hash');
+    let needsForceRestart = false;
+
+    // Check 1: Version change
+    try {
+        if (fs.existsSync(versionFile)) {
+            const savedVersion = fs.readFileSync(versionFile, 'utf-8').trim();
+            if (savedVersion !== currentVersion) {
+                needsForceRestart = true;
+                outputChannel.appendLine(`Version changed: v${savedVersion} → v${currentVersion} — force-restarting backend`);
+            }
+        } else {
+            needsForceRestart = true; // First install or missing version file
+        }
+    } catch { /* ignore */ }
+
+    // Check 2: Python script content change (catches same-version reinstalls with code changes)
+    try {
+        const scriptPath = getPythonScriptPath(context);
+        const scriptContent = fs.readFileSync(scriptPath, 'utf-8');
+        const currentHash = crypto.createHash('md5').update(scriptContent).digest('hex');
+        if (fs.existsSync(scriptHashFile)) {
+            const savedHash = fs.readFileSync(scriptHashFile, 'utf-8').trim();
+            if (savedHash !== currentHash && !needsForceRestart) {
+                needsForceRestart = true;
+                outputChannel.appendLine(`Python script changed (hash ${savedHash.slice(0,8)}→${currentHash.slice(0,8)}) — force-restarting backend`);
+            }
+        }
+        // Save current hash
+        fs.writeFileSync(scriptHashFile, currentHash, 'utf-8');
+    } catch { /* ignore */ }
+
+    // Write current version
+    try {
+        if (!fs.existsSync(CONFIG_DIR)) { fs.mkdirSync(CONFIG_DIR, { recursive: true }); }
+        fs.writeFileSync(versionFile, currentVersion, 'utf-8');
+    } catch { /* ignore */ }
+
+    if (needsForceRestart) {
+        outputChannel.appendLine('Force-killing ALL existing backend processes...');
+        // Kill ALL existing Python backends (they may have old code)
+        if (isWindows()) {
+            exec('powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like \'*kiro-autorun-win*\' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"');
+        } else {
+            exec('pkill -f kiro-autorun-v3.py');
+        }
+        removePidFile();
+        // Clean up stale heartbeat file so status bar starts fresh
+        try { if (fs.existsSync(HEARTBEAT_FILE)) { fs.unlinkSync(HEARTBEAT_FILE); } } catch { /* ignore */ }
+        // Wait for processes to die before starting fresh
+        await new Promise(resolve => setTimeout(resolve, 1500));
     }
 
-    // Auto-restart detection: if this is a fresh install/update, prompt reload
-    const installedVersionKey = 'kiroAutorun.lastInstalledVersion';
-    const currentVersion = context.extension.packageJSON.version;
-    const lastVersion = context.globalState.get<string>(installedVersionKey);
-    if (lastVersion && lastVersion !== currentVersion) {
-        outputChannel.appendLine(`Updated from v${lastVersion} to v${currentVersion}`);
-        vscode.window.showInformationMessage(
-            `Kiro AutoRun updated to v${currentVersion}. Reload to apply.`,
-            'Reload Now'
-        ).then(choice => {
-            if (choice === 'Reload Now') {
-                vscode.commands.executeCommand('workbench.action.reloadWindow');
-            }
-        });
+    // Auto-start Layer 2 (backend) if enabled
+    if (config.enabled) {
+        startBackend(context);
+    } else {
+        // Even if disabled, start heartbeat poll in case backend is running from another window
+        startHeartbeatPoll();
     }
-    context.globalState.update(installedVersionKey, currentVersion);
+
+    context.globalState.update('kiroAutorun.lastInstalledVersion', currentVersion);
 }
 
 /**

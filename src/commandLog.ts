@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as os from 'os';
 
 export interface CommandLogEntry {
   id: number;
@@ -10,7 +11,7 @@ export interface CommandLogEntry {
   status: 'auto-approved' | 'denied' | 'manual';
 }
 
-const LOG_DIR = '.kiro-autorun';
+const LOG_DIR = path.join(os.homedir(), '.kiro-autorun');
 const LOG_FILE = 'history.json';
 
 let entries: CommandLogEntry[] = [];
@@ -18,14 +19,10 @@ let nextId = 1;
 let panel: vscode.WebviewPanel | undefined;
 
 /**
- * Get the log file path for the current workspace
+ * Get the log file path (global, not workspace-dependent)
  */
-function getLogFilePath(): string | undefined {
-  const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-  if (!workspaceFolder) {
-    return undefined;
-  }
-  return path.join(workspaceFolder.uri.fsPath, LOG_DIR, LOG_FILE);
+function getLogFilePath(): string {
+  return path.join(LOG_DIR, LOG_FILE);
 }
 
 /**
@@ -33,7 +30,7 @@ function getLogFilePath(): string | undefined {
  */
 export function loadLog(): void {
   const logPath = getLogFilePath();
-  if (!logPath || !fs.existsSync(logPath)) {
+  if (!fs.existsSync(logPath)) {
     entries = [];
     nextId = 1;
     return;
@@ -49,13 +46,10 @@ export function loadLog(): void {
 }
 
 /**
- * Save log entries to the workspace log file
+ * Save log entries to the global log file
  */
 function saveLog(): void {
   const logPath = getLogFilePath();
-  if (!logPath) {
-    return;
-  }
   const dir = path.dirname(logPath);
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });

@@ -2,7 +2,7 @@
   "name": "kiro-autorun",
   "displayName": "Kiro AutoRun",
   "description": "Auto-clicks Run/Accept All for Kiro IDE prompts with banned-keyword safety (macOS + Windows)",
-  "version": "2.1.7",
+  "version": "2.1.22",
   "publisher": "ANLE",
   "icon": "icon.png",
   "repository": {
@@ -64,6 +64,10 @@
       {
         "command": "kiroAutorun.reloadWindow",
         "title": "Kiro AutoRun: Reload Window"
+      },
+      {
+        "command": "kiroAutorun.checkStatus",
+        "title": "Kiro AutoRun: Check Backend Status"
       }
     ],
     "configuration": {
@@ -160,7 +164,7 @@
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "package": "./node_modules/.bin/vsce package --no-dependencies --allow-missing-repository"
+    "package": "npx vsce package --no-dependencies --allow-missing-repository"
   },
   "devDependencies": {
     "@types/vscode": "^1.85.0",

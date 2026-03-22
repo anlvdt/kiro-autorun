@@ -7,6 +7,8 @@ let blockedCount = 0;
 let lastActionTime: number | null = null;
 let startTime: number | null = null;
 let backendHealthy = true;
+let lastHeartbeatMs: number | null = null;  // timestamp (ms) of last heartbeat from Python
+let backendPid: number | null = null;       // PID of the backend process
 
 function relativeTime(ms: number): string {
     const sec = Math.floor(ms / 1000);
@@ -25,6 +27,17 @@ function uptimeStr(): string {
     if (min < 60) { return `${min}m`; }
     const hr = Math.floor(min / 60);
     return `${hr}h ${min % 60}m`;
+}
+
+function heartbeatAgeStr(): string {
+    if (!lastHeartbeatMs) { return 'no data'; }
+    const age = Date.now() - lastHeartbeatMs;
+    const sec = Math.floor(age / 1000);
+    if (sec < 5) { return '🟢 live'; }
+    if (sec < 30) { return `🟢 ${sec}s ago`; }
+    if (sec < 120) { return `🟡 ${sec}s ago`; }
+    const min = Math.floor(sec / 60);
+    return `🔴 ${min}m ago`;
 }
 
 export function createStatusBar(): vscode.StatusBarItem {
@@ -58,16 +71,32 @@ export function updateStatusBar(config: AutoRunConfig, running: boolean): void {
         const stats = approvedCount > 0 || blockedCount > 0
             ? ` ┊ ✓${approvedCount} ✕${blockedCount}`
             : '';
-        const healthIcon = backendHealthy ? '' : ' ⚠';
-        statusBarItem.text = `$(zap) AutoRun ON${stats}${healthIcon}`;
-        statusBarItem.backgroundColor = backendHealthy ? undefined :
-            new vscode.ThemeColor('statusBarItem.errorBackground');
-        statusBarItem.color = backendHealthy ? '#3fb950' : undefined;
+
+        // Status icon based on heartbeat freshness
+        let statusIcon = '$(zap)';
+        let statusColor = '#3fb950';
+        let bgColor: vscode.ThemeColor | undefined;
+        if (!backendHealthy) {
+            statusIcon = '$(warning)';
+            statusColor = '';
+            bgColor = new vscode.ThemeColor('statusBarItem.errorBackground');
+        } else if (lastHeartbeatMs) {
+            const heartbeatAge = Date.now() - lastHeartbeatMs;
+            if (heartbeatAge > 60_000) {
+                statusIcon = '$(pulse)';
+                statusColor = '#d29922';  // yellow — stale
+            }
+        }
+
+        statusBarItem.text = `${statusIcon} AutoRun ON${stats}`;
+        statusBarItem.backgroundColor = bgColor;
+        statusBarItem.color = statusColor || undefined;
 
         const lastStr = lastActionTime
             ? relativeTime(Date.now() - lastActionTime)
             : 'none yet';
         const healthStr = backendHealthy ? '✓ Healthy' : '⚠ Backend lost — try restarting';
+        const pidStr = backendPid ? `PID ${backendPid}` : 'unknown';
 
         statusBarItem.tooltip = [
             '⚡ Kiro AutoRun — Ops Monitor',
@@ -76,7 +105,12 @@ export function updateStatusBar(config: AutoRunConfig, running: boolean): void {
             `✕ Blocked: ${blockedCount}`,
             `⏱ Uptime: ${uptimeStr()}`,
             `🕐 Last action: ${lastStr}`,
-            `🔌 Backend: ${healthStr}`,
+            '',
+            '── Backend Status ──',
+            `🔌 Status: ${healthStr}`,
+            `💓 Heartbeat: ${heartbeatAgeStr()}`,
+            `🔧 Process: ${pidStr}`,
+            '',
             `🛡 Banned keywords: ${config.bannedKeywords.length}`,
             `⏲ Poll interval: ${config.pollInterval}s`,
             '',
@@ -113,6 +147,22 @@ export function setBackendHealth(healthy: boolean): void {
 
 export function isBackendHealthy(): boolean {
     return backendHealthy;
+}
+
+export function setLastHeartbeat(timestampMs: number): void {
+    lastHeartbeatMs = timestampMs;
+}
+
+export function getLastHeartbeat(): number | null {
+    return lastHeartbeatMs;
+}
+
+export function setBackendPid(pid: number | null): void {
+    backendPid = pid;
+}
+
+export function getBackendPid(): number | null {
+    return backendPid;
 }
 
 export function disposeStatusBar(): void {

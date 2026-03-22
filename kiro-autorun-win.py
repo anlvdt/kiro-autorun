@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Kiro AutoRun Windows Backend v2.1.6
+Kiro AutoRun Windows Backend v2.1.21
 Auto-approves Kiro IDE command prompts on Windows.
 
 Architecture:
@@ -15,6 +15,14 @@ User can work on other apps normally while Kiro auto-approves in background.
 import subprocess, time, sys, os, json, signal, atexit, logging, re, unicodedata, hashlib
 import ctypes
 import ctypes.wintypes
+
+VERSION = "2.1.22"
+
+# Enforce physical coordinates for correct window bounds and mouse_event targeting
+try:
+    ctypes.windll.user32.SetProcessDPIAware()
+except Exception:
+    pass
 
 # ─── Dependency checks ───────────────────────────────────────────────
 
@@ -53,6 +61,8 @@ CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 ACTION_LOG_FILE = os.path.join(CONFIG_DIR, "actions.log")
 BACKEND_LOG = os.path.join(CONFIG_DIR, "backend.log")
 LEARNED_FILE = os.path.join(CONFIG_DIR, "learned.json")
+PID_FILE = os.path.join(CONFIG_DIR, "backend.pid")
+HEARTBEAT_FILE = os.path.join(CONFIG_DIR, "heartbeat")
 
 POLL_INTERVAL = 2
 TARGET_APP = "Kiro"
@@ -61,15 +71,16 @@ SHOW_NOTIFICATION = False
 NOTIFICATION_SOUND = True
 STUCK_RECOVERY_ENABLED = True
 
-CLICKABLE_BUTTONS = ["Run", "Accept All", "Reject All", "Trust"]
-DIALOG_BUTTON_TEXTS = ["run", "trust", "▶", "►", "▷", "play", "⏵"]
-PRESSABLE_BUTTONS = {"accept all", "trust", "run", "play"}
+CLICKABLE_BUTTONS = ["Run", "Accept All", "Reject All", "Trust", "Play", "Accept"]
+DIALOG_BUTTON_TEXTS = ["run", "trust", "▶", "►", "▷", "play", "⏵", "accept all", "accept"]
+PRESSABLE_BUTTONS = {"accept all", "accept", "trust", "run", "play", "▶", "►", "▷", "⏵"}
 
 COOLDOWN_SECONDS = 5
-POLL_SLOW = 5.0
-POLL_NORMAL = 2.0
-POLL_FAST = 0.8
+POLL_SLOW = 3.0
+POLL_NORMAL = 1.0
+POLL_FAST = 0.2
 AUTO_TRUST_THRESHOLD = 5
+MIN_STUCK_FOR_MOUSE_FALLBACK = 1  # Speed up fallback: wait only 1 cycle before trying OCR
 
 BANNED_KEYWORDS = [
     "rm -rf /", "rm -rf ~", "rm -rf /*", "rm -rf .",
@@ -127,10 +138,13 @@ click_count = 0
 running = True
 last_click_cmd = None
 last_click_time = 0
-stuck_cycles = 0
+_stuck_cycles = {}     # per-window: {hwnd: int}
 STUCK_THRESHOLD = 15
-_last_img_hash = None
-_last_img_had_trigger = False
+_last_img_hash = {}     # per-window: {hwnd: hash_str}
+_last_img_had_trigger = {}  # per-window: {hwnd: bool}
+_consecutive_errors = 0
+MAX_CONSECUTIVE_ERRORS = 50  # auto-exit after this many to allow extension to restart fresh
+ERROR_BACKOFF_THRESHOLD = 10  # after this many errors, log traceback + sleep longer
 
 try:
     from collections import Counter
@@ -319,7 +333,7 @@ def capture_window(win):
         saveDC = mfcDC.CreateCompatibleDC()
         saveBitMap = win32ui.CreateBitmap()
         saveBitMap.CreateCompatibleBitmap(mfcDC, w, h)
-        saveDC.SelectObject(saveBitMap)
+        old_bmp = saveDC.SelectObject(saveBitMap)
 
         # PrintWindow with PW_RENDERFULLCONTENT (flag 2) for Electron/DWM content
         ctypes.windll.user32.PrintWindow(hwnd, saveDC.GetSafeHdc(), 2)
@@ -333,6 +347,7 @@ def capture_window(win):
             bmpstr, 'raw', 'BGRX', 0, 1
         )
 
+        saveDC.SelectObject(old_bmp)
         saveDC.DeleteDC()
         mfcDC.DeleteDC()
         win32gui.ReleaseDC(hwnd, hwndDC)
@@ -498,24 +513,27 @@ def _ocr_tesseract(img, img_w, img_h):
 # ─── OCR Window (with caching) ──────────────────────────────────────
 
 def ocr_window(win):
-    """Capture and OCR the Kiro window. Returns list of OCR results."""
+    """Capture and OCR the Kiro window. Returns (img, list of OCR results)."""
     global _last_img_hash, _last_img_had_trigger
+    hwnd = win["hwnd"]
 
     img = capture_window(win)
     if not img:
-        return []
+        return None, []
 
     # Crop bottom 60% (trigger text and buttons are at the bottom)
     img_w, img_h = img.size
     crop_top = int(img_h * 0.4)
     img_cropped = img.crop((0, crop_top, img_w, img_h))
 
-    # Image hash for change detection
+    # Image hash for change detection (per-window)
     try:
         img_hash = hashlib.md5(img_cropped.tobytes()).hexdigest()
-        if img_hash == _last_img_hash and not _last_img_had_trigger:
-            return []
-        _last_img_hash = img_hash
+        prev_hash = _last_img_hash.get(hwnd)
+        prev_had_trigger = _last_img_had_trigger.get(hwnd, False)
+        if img_hash == prev_hash and not prev_had_trigger:
+            return img, []
+        _last_img_hash[hwnd] = img_hash
     except Exception:
         pass
 
@@ -527,14 +545,14 @@ def ocr_window(win):
         r["y"] = crop_ratio + r["y"] * (1.0 - crop_ratio)
         r["h"] = r["h"] * (1.0 - crop_ratio)
 
-    # Update trigger cache
+    # Update trigger cache (per-window)
     if results:
         results_text_lower = " ".join(r["text"].lower() for r in results)
-        _last_img_had_trigger = any(t in results_text_lower for t in TRIGGER_TEXTS)
+        _last_img_had_trigger[hwnd] = any(t in results_text_lower for t in TRIGGER_TEXTS)
     else:
-        _last_img_had_trigger = False
+        _last_img_had_trigger[hwnd] = False
 
-    return results
+    return img, results
 
 # ─── UI Automation - Press Buttons ───────────────────────────────────
 
@@ -554,7 +572,8 @@ def _get_uia_module():
 
 def uia_press_button(hwnd, button_titles):
     """Find and press a button using UI Automation API.
-    Returns (pressed: bool, button_title: str or None)."""
+    Returns (pressed: bool, button_title: str or None).
+    Uses partial/case-insensitive matching to handle Electron accessibility labels."""
     try:
         import comtypes  # noqa: F401
         from comtypes import client as com_client
@@ -577,16 +596,54 @@ def uia_press_button(hwnd, button_titles):
         if not buttons:
             return False, None
 
+        # Debug: log all button names once per cycle to diagnose matching issues
+        all_btn_names = []
+        for i in range(buttons.Length):
+            btn = buttons.GetElement(i)
+            name = (btn.CurrentName or "").strip()
+            if name:
+                all_btn_names.append(name)
+        if all_btn_names:
+            log.info(f"   UIA buttons: {all_btn_names[:20]}")
+
         # Collect all matching buttons with their priority
+        # Use partial matching: button name contains target OR target contains button name
         matched = []  # list of (priority_index, btn_element, target_title)
+        
+        # We need the window rectangle to filter by relative position
+        import ctypes
+        from ctypes import wintypes
+        rect = wintypes.RECT()
+        ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect))
+        win_h = max(1, rect.bottom - rect.top)
+        
         for i in range(buttons.Length):
             btn = buttons.GetElement(i)
             name = btn.CurrentName or ""
             name_lower = name.strip().lower()
+            if not name_lower:
+                continue
+                
+            # Anti-false-positive: exclude buttons at the very top of VS Code (e.g., Debug "Play" button)
+            try:
+                btn_rect = btn.CurrentBoundingRectangle
+                if btn_rect.bottom > 0:
+                    btn_y_center = (btn_rect.top + btn_rect.bottom) / 2
+                    rel_y = (btn_y_center - rect.top) / win_h
+                    if rel_y < 0.15:
+                        continue  # Skip buttons in the top 15% of the window (toolbars)
+            except Exception:
+                pass
 
             for priority_idx, target in enumerate(button_titles):
-                if target.lower() == name_lower:
-                    if name_lower not in PRESSABLE_BUTTONS:
+                target_lower = target.lower()
+                import re
+                name_clean = re.sub(r'[^a-z0-9\s]', '', name_lower).strip()
+                
+                # Exact match only to prevent clicking unrelated VS Code buttons (like "Trust Workspace")
+                is_match = (target_lower == name_lower or target_lower == name_clean)
+                if is_match:
+                    if name_lower not in PRESSABLE_BUTTONS and target_lower not in PRESSABLE_BUTTONS:
                         continue
                     matched.append((priority_idx, btn, target))
 
@@ -611,19 +668,30 @@ def uia_press_button(hwnd, button_titles):
         log.warning(f"UI Automation error: {e}")
         return False, None
 
-# ─── Click at Position (Win32) ───────────────────────────────────────
+def _find_chrome_widget(hwnd):
+    """Find the Chrome_RenderWidgetHostHWND child window inside an Electron app."""
+    result = []
+    def enum_child(child_hwnd, _):
+        try:
+            class_name = win32gui.GetClassName(child_hwnd)
+            if "Chrome" in class_name and "Widget" in class_name:
+                result.append(child_hwnd)
+        except Exception:
+            pass
+        return True
+    try:
+        win32gui.EnumChildWindows(hwnd, enum_child, None)
+    except Exception:
+        pass
+    return result[0] if result else None
 
-def click_at_position(x, y, win=None):
-    """Click at screen coordinates.
-    Strategy:
-      1. Try SendMessage (no cursor movement, works for native Win32 apps)
-      2. Fallback: SetCursorPos + mouse_event (moves cursor briefly, works for Electron/CEF)
-    """
+def click_at_position(x, y, win=None, skip_postmessage=False):
+    """Click at screen coordinates. Tries PostMessage first (no cursor steal),
+    then falls back to mouse_event with save/restore of cursor + foreground window."""
     if not win:
         return False
 
     hwnd = win["hwnd"]
-    # Convert screen coords to client coords for bounds check
     client_x = x - win["x"]
     client_y = y - win["y"]
 
@@ -631,54 +699,92 @@ def click_at_position(x, y, win=None):
         log.warning(f"Click guard: ({x},{y}) outside window bounds")
         return False
 
-    # Strategy: Use SetCursorPos + mouse_event (reliable for Electron/CEF apps)
-    # Save cursor position, click, restore
-    try:
-        # Save current cursor position
-        cursor_info = win32gui.GetCursorPos()
+    WM_LBUTTONDOWN = 0x0201
+    WM_LBUTTONUP = 0x0202
+    MK_LBUTTON = 0x0001
+    lparam = (client_y << 16) | (client_x & 0xFFFF)
 
-        # Bring window to foreground
+    # Strategy 1: PostMessage to Chrome render widget (no cursor steal)
+    if not skip_postmessage:
+        target_hwnd = _find_chrome_widget(hwnd) or hwnd
+        try:
+            win32gui.PostMessage(target_hwnd, WM_LBUTTONDOWN, MK_LBUTTON, lparam)
+            time.sleep(0.08)
+            win32gui.PostMessage(target_hwnd, WM_LBUTTONUP, 0, lparam)
+            widget_info = "Chrome widget" if target_hwnd != hwnd else "top-level"
+            log.info(f"   PostMessage click at ({client_x},{client_y}) -> {widget_info}")
+            return True
+        except Exception as e:
+            log.warning(f"PostMessage click failed: {e}, trying mouse_event...")
+
+    # Strategy 2: mouse_event — actually works for Electron/Chromium
+    # Uses SendInput for a tighter atomic click with minimal cursor flicker.
+    # Cursor + foreground window are saved and restored immediately.
+    try:
+        old_foreground = win32gui.GetForegroundWindow()
+
+        old_cursor = win32gui.GetCursorPos()
+
+        # Bring Kiro to front briefly
         try:
             win32gui.SetForegroundWindow(hwnd)
-            time.sleep(0.1)
+            time.sleep(0.03)
         except Exception:
             pass
 
-        # Move cursor and click
-        # mouse_event uses absolute coordinates (0-65535 normalized to screen)
-        # Get virtual screen dimensions for multi-monitor support
-        sm_xvirtualscreen = ctypes.windll.user32.GetSystemMetrics(76)  # SM_XVIRTUALSCREEN
-        sm_yvirtualscreen = ctypes.windll.user32.GetSystemMetrics(77)  # SM_YVIRTUALSCREEN
-        sm_cxvirtualscreen = ctypes.windll.user32.GetSystemMetrics(78)  # SM_CXVIRTUALSCREEN
-        sm_cyvirtualscreen = ctypes.windll.user32.GetSystemMetrics(79)  # SM_CYVIRTUALSCREEN
+        sm_xvs = ctypes.windll.user32.GetSystemMetrics(76)
+        sm_yvs = ctypes.windll.user32.GetSystemMetrics(77)
+        sm_cxvs = ctypes.windll.user32.GetSystemMetrics(78)
+        sm_cyvs = ctypes.windll.user32.GetSystemMetrics(79)
 
-        abs_x = int((x - sm_xvirtualscreen) * 65536 / sm_cxvirtualscreen)
-        abs_y = int((y - sm_yvirtualscreen) * 65536 / sm_cyvirtualscreen)
+        abs_x = int((x - sm_xvs) * 65535.0 / sm_cxvs)
+        abs_y = int((y - sm_yvs) * 65535.0 / sm_cyvs)
 
-        MOUSEEVENTF_ABSOLUTE = 0x8000
+        # Use SendInput for tight atomic move+click (less cursor flicker than mouse_event)
+        class MOUSEINPUT(ctypes.Structure):
+            _fields_ = [("dx", ctypes.c_long), ("dy", ctypes.c_long),
+                        ("mouseData", ctypes.c_ulong), ("dwFlags", ctypes.c_ulong),
+                        ("time", ctypes.c_ulong), ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong))]
+
+        class INPUT(ctypes.Structure):
+            class _U(ctypes.Union):
+                _fields_ = [("mi", MOUSEINPUT)]
+            _fields_ = [("type", ctypes.c_ulong), ("u", _U)]
+
         MOUSEEVENTF_MOVE = 0x0001
         MOUSEEVENTF_LEFTDOWN = 0x0002
         MOUSEEVENTF_LEFTUP = 0x0004
+        MOUSEEVENTF_ABSOLUTE = 0x8000
         MOUSEEVENTF_VIRTUALDESK = 0x4000
+        INPUT_MOUSE = 0
 
-        flags = MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK
+        flags_base = MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK
 
-        ctypes.windll.user32.mouse_event(flags | MOUSEEVENTF_MOVE, abs_x, abs_y, 0, 0)
-        time.sleep(0.05)
-        ctypes.windll.user32.mouse_event(flags | MOUSEEVENTF_LEFTDOWN, abs_x, abs_y, 0, 0)
-        time.sleep(0.05)
-        ctypes.windll.user32.mouse_event(flags | MOUSEEVENTF_LEFTUP, abs_x, abs_y, 0, 0)
-        time.sleep(0.05)
+        # Build 3 inputs: move, leftdown, leftup — sent atomically
+        inputs = (INPUT * 3)()
+        for i, extra_flag in enumerate([MOUSEEVENTF_MOVE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP]):
+            inputs[i].type = INPUT_MOUSE
+            inputs[i].u.mi.dx = abs_x
+            inputs[i].u.mi.dy = abs_y
+            inputs[i].u.mi.dwFlags = flags_base | extra_flag
 
-        # Restore cursor position
+        ctypes.windll.user32.SendInput(3, ctypes.byref(inputs), ctypes.sizeof(INPUT))
+
+        # Restore cursor + foreground immediately (no sleep between)
         try:
-            win32api.SetCursorPos(cursor_info)
+            win32api.SetCursorPos(old_cursor)
+        except Exception:
+            pass
+        try:
+            if old_foreground and old_foreground != hwnd:
+                win32gui.SetForegroundWindow(old_foreground)
         except Exception:
             pass
 
+        log.info(f"   SendInput click at ({x},{y}), restored cursor+foreground")
         return True
     except Exception as e:
-        log.warning(f"mouse_event click error: {e}")
+        log.warning(f"SendInput click error: {e}")
         return False
 
 # ─── Notification (Windows Toast) ────────────────────────────────────
@@ -847,28 +953,52 @@ def analyze_command_safety(cmd_text, all_text_lower):
 def ocr_find_dialog_button(ocr_results, win, ocr_confirmed_dialog=False, bg_process_y=None, use_position_fallback=False):
     """Find a pressable dialog button via OCR position."""
     reject_y = None
+    import re
+    def normalize_text(t):
+        return re.sub(r'[^a-z0-9\s]', '', t).strip()
+
     for r in ocr_results:
         text = r["text"].strip().lower()
-        if (text == "reject" or text == "reject all") and r["w"] >= 0.015:
+        if ("reject" in text or "reject all" in text) and r["w"] >= 0.015:
             reject_y = r["y"]
             break
 
-    Y_TOLERANCE = 0.03
+    Y_TOLERANCE = 0.08  # Increased from 0.03. 'Reject' has a descender 'j', dropping its Y center relative to 'Accept'
 
-    def _coords(r):
+    def is_btn_match(btn, t):
+        if t == btn: return True
+        if normalize_text(t) == btn: return True
+        if "reject" in t and "accept" in t and btn in ["accept", "accept all"]: return True
+        return False
+
+    def _coords_for_text(r, btn_text):
         win_x, win_y = win["x"], win["y"]
         win_w, win_h = win["w"], win["h"]
-        px = win_x + int((r["x"] + r["w"] / 2) * win_w)
+        t = r["text"].strip().lower()
+
+        # Handle merged boxes (e.g., "Reject Accept")
+        if "reject" in t and "accept" in t:
+            if btn_text.startswith("accept"):
+                rel_x = r["x"] + r["w"] * 0.75  # right side
+            else:
+                rel_x = r["x"] + r["w"] * 0.25  # left side
+        else:
+            rel_x = r["x"] + r["w"] / 2
+
+        px = win_x + int(rel_x * win_w)
         py = win_y + int((r["y"] + r["h"] / 2) * win_h)
         return px, py
+
+    def _coords(r):
+        return _coords_for_text(r, "")
 
     # Strategy 1: Match button text on same line as "reject"
     if reject_y is not None:
         for btn_text in DIALOG_BUTTON_TEXTS:
             for r in ocr_results:
                 text = r["text"].strip().lower()
-                if text == btn_text and abs(r["y"] - reject_y) < Y_TOLERANCE:
-                    px, py = _coords(r)
+                if is_btn_match(btn_text, text) and abs(r["y"] - reject_y) < Y_TOLERANCE:
+                    px, py = _coords_for_text(r, btn_text)
                     log.info(f"   OCR found '{btn_text}' at ({px}, {py}) - same line as Reject")
                     return btn_text, px, py
 
@@ -886,13 +1016,13 @@ def ocr_find_dialog_button(ocr_results, win, ocr_confirmed_dialog=False, bg_proc
 
     # Strategy 2: Dialog confirmed but no "reject" visible
     if ocr_confirmed_dialog and reject_y is None:
-        BOTTOM_THRESHOLD = 0.7
+        BOTTOM_THRESHOLD = 0.60
         MIN_BTN_WIDTH = 0.015
         for btn_text in DIALOG_BUTTON_TEXTS:
             for r in ocr_results:
                 text = r["text"].strip().lower()
-                if text == btn_text and r["y"] > BOTTOM_THRESHOLD and r["w"] >= MIN_BTN_WIDTH:
-                    px, py = _coords(r)
+                if is_btn_match(btn_text, text) and r["y"] > BOTTOM_THRESHOLD and r["w"] >= MIN_BTN_WIDTH:
+                    px, py = _coords_for_text(r, btn_text)
                     log.info(f"   OCR found '{btn_text}' at ({px}, {py}) - bottom area")
                     return btn_text, px, py
 
@@ -921,6 +1051,82 @@ def ocr_find_dialog_button(ocr_results, win, ocr_confirmed_dialog=False, bg_proc
 
     return None
 
+# ─── Pure CV Fallback ────────────────────────────────────────────────
+
+def cv_find_bg_process_run_button(img):
+    """
+    Scans the bottom 60% of the screenshot for the specific Kiro 'Background process'
+    action bar signature: a small red 'x' icon followed by a green '▶' icon 
+    ~20-45 pixels to its right.
+    Returns (gx, gy) of the green Run button, or None.
+    """
+    if not img: return None
+    
+    width, height = img.size
+    pixels = img.load()
+    start_y = int(height * 0.4)
+    end_y = int(height * 0.95)  # avoid the AutoRun ON green text at the very bottom
+    
+    # Fast scan for green candidates representing the generic Play button
+    green_candidates = []
+    for y in range(start_y, end_y, 3):
+        for x in range(int(width * 0.4), width, 3):
+            r, g, b = pixels[x, y]
+            if g > r + 30 and g > b + 30 and g > 100:
+                green_candidates.append((x, y))
+                
+    if not green_candidates:
+        return None
+
+    # Group into clusters
+    clusters = []
+    for x, y in green_candidates:
+        added = False
+        for c in clusters:
+            cx, cy, count, minx, maxx, miny, maxy = c
+            if abs(x - cx) < 25 and abs(y - cy) < 25:
+                nc = count + 1
+                c[0] = (cx * count + x) / nc
+                c[1] = (cy * count + y) / nc
+                c[2] = nc
+                c[3] = min(minx, x)
+                c[4] = max(maxx, x)
+                c[5] = min(miny, y)
+                c[6] = max(maxy, y)
+                added = True
+                break
+        if not added:
+            clusters.append([float(x), float(y), 1, x, x, y, y])
+
+    # Filter out massive blocks or noise
+    valid_greens = [c for c in clusters if 3 < c[2] < 300]
+    
+    for c in valid_greens:
+        gx = int(c[0])
+        gy = int(c[1])
+        
+        # Look to the left for the red Cancel 'x' icon (approx 20-50 px away)
+        found_red = False
+        scan_left_start = max(0, gx - 50)
+        scan_left_end = max(0, gx - 15)
+        
+        # Scan a slightly larger Y window around the green center
+        for y in range(gy - 8, gy + 8):
+            if y < 0 or y >= height: continue
+            for x in range(scan_left_start, scan_left_end):
+                r, g, b = pixels[x, y]
+                # Red constraint: heavily biased towards Red channel
+                if r > g + 20 and r > b + 20 and r > 100:
+                    found_red = True
+                    break
+            if found_red:
+                break
+                
+        if found_red:
+            return (gx, gy)
+            
+    return None
+
 # ─── Cooldown ────────────────────────────────────────────────────────
 
 def is_in_cooldown():
@@ -935,14 +1141,21 @@ def record_click(cmd_text):
 
 # ─── Main Monitor Cycle ─────────────────────────────────────────────
 
+def write_heartbeat():
+    """Write current timestamp to heartbeat file so extension can detect backend is alive."""
+    try:
+        with open(HEARTBEAT_FILE, "w", encoding="utf-8") as f:
+            f.write(str(time.time()))
+    except OSError:
+        pass
+
 def monitor_cycle():
-    global click_count, stuck_cycles
+    global click_count
 
     load_config()
 
     windows = find_kiro_windows()
     if not windows:
-        stuck_cycles = 0
         return
 
     # Try each Kiro window — the prompt may be on any of them
@@ -952,9 +1165,9 @@ def monitor_cycle():
             return
 
 def _monitor_window(win):
-    global stuck_cycles
-    ocr_results = ocr_window(win)
-    if not ocr_results:
+    hwnd = win["hwnd"]
+    img, ocr_results = ocr_window(win)
+    if not ocr_results and not img:
         return False
 
     all_text_lower = " ".join(r["text"].lower() for r in ocr_results)
@@ -962,16 +1175,56 @@ def _monitor_window(win):
     trigger_y = None
     for trigger in TRIGGER_TEXTS:
         if trigger in all_text_lower:
-            matched_trigger = trigger
-            # Find Y position from the first word of the trigger
+            # Find Y position AND validate it's an actual prompt banner
+            # Real Kiro prompts appear at the bottom of the window (Y > 0.70)
+            # Chat history messages with the same text appear in the middle
             first_word = trigger.split()[0]
+            best_y = None
             for r in ocr_results:
                 if first_word in r["text"].lower():
-                    trigger_y = r["y"]
-                    break
+                    candidate_y = r["y"]
+                    # Accept if in bottom 30% of window (real prompt area)
+                    if candidate_y > 0.70:
+                        best_y = candidate_y
+                        break
+                    # Also accept if co-located with Reject/Accept buttons
+                    y_tolerance = 0.06
+                    for r2 in ocr_results:
+                        t2 = r2["text"].strip().lower()
+                        if t2 in ("reject all", "accept all", "reject", "trust", "run"):
+                            if abs(r2["y"] - candidate_y) < y_tolerance:
+                                best_y = candidate_y
+                                break
+                    if best_y is not None:
+                        break
+            if best_y is not None:
+                matched_trigger = trigger
+                trigger_y = best_y
             break
 
-    has_accept_all = "accept all" in all_text_lower and "reject all" in all_text_lower
+    has_accept_all = False
+    if "accept" in all_text_lower and "reject" in all_text_lower:
+        # Validate that these appear at the bottom of the screen (Y > 0.70)
+        # to prevent triggering on chat history containing these words.
+        # Check for 'accept' and 'reject' in case OCR splits 'accept all' into two boxes
+        accept_valid = False
+        reject_valid = False
+        log.info(f"[DEBUG] Found 'accept' and 'reject' in text. Checking Y-coords...")
+        for r in ocr_results:
+            t = r["text"].strip().lower()
+            if "accept" in t:
+                log.info(f"[DEBUG] 'accept' found at Y={r['y']:.3f} (text: '{t}')")
+                if r["y"] > 0.60:
+                    accept_valid = True
+            if "reject" in t:
+                log.info(f"[DEBUG] 'reject' found at Y={r['y']:.3f} (text: '{t}')")
+                if r["y"] > 0.60:
+                    reject_valid = True
+        has_accept_all = accept_valid and reject_valid
+        if has_accept_all:
+            log.info("[DEBUG] has_accept_all evaluated to TRUE!")
+        else:
+            log.info("[DEBUG] has_accept_all evaluated to FALSE!")
 
     bg_process_y = None
     has_bg_process = False
@@ -980,9 +1233,22 @@ def _monitor_window(win):
         # Only match short standalone text entries (actual Kiro prompt bar, not chat/code)
         if ("background process" in text and len(text) < 30) or \
            (text == "background" and r["w"] > 0.02 and r["w"] < 0.15):
-            bg_process_y = r["y"]
-            has_bg_process = True
-            break
+            # VALIDATION: Must have nearby approval buttons (Run/Trust/Reject) within
+            # a similar Y-band to confirm this is an actual approval banner,
+            # not just a status label in the agent panel.
+            candidate_y = r["y"]
+            y_tolerance = 0.06  # ~6% of screen height
+            has_nearby_buttons = False
+            for r2 in ocr_results:
+                t2 = r2["text"].strip().lower()
+                if t2 in ("run", "trust", "reject", "accept all", "reject all", "▶", "►", "play"):
+                    if abs(r2["y"] - candidate_y) < y_tolerance:
+                        has_nearby_buttons = True
+                        break
+            if has_nearby_buttons:
+                bg_process_y = candidate_y
+                has_bg_process = True
+                break
 
     ocr_sees_dialog_buttons = False
     for r in ocr_results:
@@ -993,11 +1259,23 @@ def _monitor_window(win):
 
     ocr_confirmed_dialog = bool(matched_trigger) and ocr_sees_dialog_buttons
 
+    # CV Fallback: If OCR completely missed the text "Background process", 
+    # but the red-green icon signature is clearly visible on screen.
+    cv_btn_coords = None
+    if img and not matched_trigger and not has_accept_all and not has_bg_process:
+        cv_btn_coords = cv_find_bg_process_run_button(img)
+        if cv_btn_coords:
+            has_bg_process = True  # Force trigger
+            matched_trigger = "Background process"
+            ocr_confirmed_dialog = True
+            log.info("[DEBUG] Pure CV Fallback identified Kiro Action Bar via Red/Green signature!")
+
     if not matched_trigger and not has_accept_all and not has_bg_process:
-        stuck_cycles = 0
+        _stuck_cycles[hwnd] = 0
         return False
 
     if matched_trigger and not ocr_sees_dialog_buttons and not has_accept_all and not has_bg_process:
+        _stuck_cycles[hwnd] = 0
         return False
 
     trigger_label = matched_trigger or ("Background process" if has_bg_process else "Accept All/Reject All")
@@ -1017,7 +1295,7 @@ def _monitor_window(win):
         send_notification(f"Blocked: {safety_reason}", play_sound=True)
         log_action("denied", cmd_text or trigger_label, safety_reason)
         record_click(cmd_text)
-        stuck_cycles = 0
+        _stuck_cycles[hwnd] = 0
         return True  # Trigger found, blocked — don't scan other windows
 
     # Learn pattern
@@ -1049,51 +1327,57 @@ def _monitor_window(win):
                 elif count_seen % 2 == 0:
                     save_learned()
 
-    hwnd = win.get("hwnd")
+    win_hwnd = win.get("hwnd")
 
-    # PRIMARY: UI Automation API
-    if hwnd:
-        pressed, btn_title = uia_press_button(hwnd, CLICKABLE_BUTTONS)
+    # PRIMARY: UI Automation API (no cursor steal, accurate button targeting)
+    if win_hwnd:
+        pressed, btn_title = uia_press_button(win_hwnd, CLICKABLE_BUTTONS)
         if pressed:
             count = record_click(cmd_text)
             log.info(f"UIA pressed '{btn_title}' (#{count})")
             send_notification(f"Auto-approved '{btn_title}' (#{count})")
             log_action("auto-approved", cmd_text or btn_title,
                       f"Trigger: {trigger_label} [UIA]", learn_pattern, auto_trust_signal)
-            stuck_cycles = 0
+            _stuck_cycles[hwnd] = 0
             time.sleep(2)
             return True
 
-    # SECONDARY: OCR-position click
-    # Only allow position-based fallback after being stuck for a few cycles
-    use_fallback = stuck_cycles >= 5
-    dialog_btn = ocr_find_dialog_button(ocr_results, win,
-                                         ocr_confirmed_dialog=ocr_confirmed_dialog,
-                                         bg_process_y=bg_process_y,
-                                         use_position_fallback=use_fallback)
-    if dialog_btn:
-        btn_text, px, py = dialog_btn
-        if click_at_position(px, py, win=win):
-            count = record_click(cmd_text)
-            source = "BG-process" if has_bg_process else "OCR-click"
-            log.info(f"{source} pressed '{btn_text}' at ({px},{py}) (#{count})")
-            send_notification(f"Auto-approved '{btn_text}' (#{count})")
-            log_action("auto-approved", cmd_text or btn_text,
-                      f"Trigger: {trigger_label} [{source}]", learn_pattern, auto_trust_signal)
-            stuck_cycles = 0
-            time.sleep(2)
-            return True
+    # SECONDARY: OCR-confirmed click (SendInput — only after UIA has failed several cycles)
+    # For "Background process" prompts, UIA never finds the Run button (it's not exposed
+    # as a UIA Button), so we skip the delay and use OCR immediately.
+    # For "waiting on input" prompts, UIA works on the 2nd cycle, so we wait.
+    sc = _stuck_cycles.get(hwnd, 0)
+    should_try_ocr = has_bg_process or has_accept_all or sc >= MIN_STUCK_FOR_MOUSE_FALLBACK
+    if should_try_ocr:
+        dialog_btn = ocr_find_dialog_button(ocr_results, win,
+                                             ocr_confirmed_dialog=ocr_confirmed_dialog,
+                                             bg_process_y=bg_process_y,
+                                             use_position_fallback=True)
+        if dialog_btn:
+            btn_text, px, py = dialog_btn
+            if click_at_position(px, py, win=win, skip_postmessage=True):
+                count = record_click(cmd_text)
+                source = "BG-process" if has_bg_process else "OCR-click"
+                log.info(f"{source} pressed '{btn_text}' at ({px},{py}) (#{count})")
+                send_notification(f"Auto-approved '{btn_text}' (#{count})")
+                log_action("auto-approved", cmd_text or btn_text,
+                          f"Trigger: {trigger_label} [{source}]", learn_pattern, auto_trust_signal)
+                _stuck_cycles[hwnd] = 0
+                time.sleep(2)
+                return True
 
-    # No button found on this window — but trigger was found
+    # UIA could not find a clickable button — wait and retry next cycle
     if matched_trigger or has_accept_all or has_bg_process:
-        stuck_cycles += 1
-        log.info(f"Trigger found but no button (stuck: {stuck_cycles}/{STUCK_THRESHOLD})")
+        sc = _stuck_cycles.get(hwnd, 0) + 1
+        _stuck_cycles[hwnd] = sc
+        if sc <= 3 or sc % 10 == 0:
+            log.info(f"Trigger found but no button (stuck: {sc}/{STUCK_THRESHOLD}) [hwnd={hwnd}]")
 
-        if stuck_cycles >= STUCK_THRESHOLD and STUCK_RECOVERY_ENABLED:
-            log.warning(f"Stuck for {stuck_cycles} cycles")
-            send_notification("Stuck: trigger found but can't press button", play_sound=True)
-            log_action("stuck", "no_button", f"Stuck {stuck_cycles} cycles")
-            stuck_cycles = 0
+        if sc >= STUCK_THRESHOLD and STUCK_RECOVERY_ENABLED:
+            log.warning(f"Stuck for {sc} cycles — UIA cannot find button [hwnd={hwnd}]")
+            send_notification("Stuck: trigger found but UIA can't press button", play_sound=True)
+            log_action("stuck", "no_button", f"Stuck {sc} cycles — UIA only")
+            _stuck_cycles[hwnd] = 0
         return True  # Trigger was found (even if no button), don't scan other windows
 
     return False  # No trigger found on this window
@@ -1131,7 +1415,7 @@ def main():
     except Exception:
         pass
 
-    log.info("Kiro AutoRun Windows v2.1.7")
+    log.info(f"Kiro AutoRun Windows v{VERSION}")
     log.info(f"   Target: {TARGET_APP}")
     log.info(f"   Triggers: {TRIGGER_TEXTS}")
     log.info(f"   Poll: adaptive {POLL_SLOW}s/{POLL_NORMAL}s/{POLL_FAST}s")
@@ -1152,24 +1436,62 @@ def main():
     log.info("Monitoring... (Ctrl+C to stop)")
     log.info("")
 
+    # Write PID file for coordination with TypeScript extension
+    def _write_pid_file():
+        try:
+            os.makedirs(CONFIG_DIR, exist_ok=True)
+            with open(PID_FILE, "w") as f:
+                f.write(str(os.getpid()))
+        except OSError:
+            pass
+
+    def _remove_pid_file():
+        try:
+            if os.path.exists(PID_FILE):
+                os.unlink(PID_FILE)
+        except OSError:
+            pass
+
+    _write_pid_file()
+    atexit.register(_remove_pid_file)
+
+    global _consecutive_errors
     while running:
         try:
+            write_heartbeat()
+
             kiro_present = bool(find_kiro_windows())
-            had_trigger_before = _last_img_had_trigger
+            # Check any window had trigger
+            had_trigger_before = any(_last_img_had_trigger.values())
 
             monitor_cycle()
 
+            # Reset error counter on successful cycle
+            _consecutive_errors = 0
+
             if not kiro_present:
                 sleep_dur = POLL_SLOW
-            elif had_trigger_before or _last_img_had_trigger:
+            elif had_trigger_before or any(_last_img_had_trigger.values()):
                 sleep_dur = POLL_FAST
             else:
                 sleep_dur = POLL_NORMAL
         except KeyboardInterrupt:
             break
         except Exception as e:
-            log.error(f"Cycle error: {e}")
-            sleep_dur = POLL_NORMAL
+            import traceback
+            _consecutive_errors += 1
+
+            if _consecutive_errors <= 3 or _consecutive_errors % 10 == 0:
+                log.error(f"Cycle error (#{_consecutive_errors}): {e}")
+            if _consecutive_errors >= ERROR_BACKOFF_THRESHOLD:
+                log.error(f"Full traceback (error #{_consecutive_errors}):\n{traceback.format_exc()}")
+                sleep_dur = 30.0  # Back off significantly
+            else:
+                sleep_dur = POLL_NORMAL
+
+            if _consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                log.error(f"FATAL: {_consecutive_errors} consecutive errors — exiting for auto-restart")
+                break
 
         time.sleep(sleep_dur)
 

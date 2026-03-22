@@ -15,7 +15,7 @@ export interface AutoRunConfig {
 }
 
 const SECTION = 'kiroAutorun';
-const CONFIG_DIR = path.join(os.homedir(), '.kiro-autorun');
+export const CONFIG_DIR = path.join(os.homedir(), '.kiro-autorun');
 const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
 export const ACTION_LOG_FILE = path.join(CONFIG_DIR, 'actions.log');
 
