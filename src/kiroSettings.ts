@@ -11,6 +11,9 @@ import * as vscode from 'vscode';
 // blocked by the denylist (e.g. "rm -rf /" is denied, but "rm" is trusted).
 const DEFAULT_TRUSTED_PATTERNS = [
     // ── Shell basics ──
+    'bash *',
+    'sh *',
+    'zsh *',
     'ls *', 'ls',
     'pwd',
     'cd *',
@@ -63,6 +66,15 @@ const DEFAULT_TRUSTED_PATTERNS = [
     'id',
     'man *',
     'open *',  // macOS open
+    'ps *',    // Added: Process status
+    'lsof *',  // Added: List open files
+    'netstat *', // Added: Network statistics
+    'ping *',  // Added: Network diagnostics
+    'top',     // Added: Process monitor
+    'htop',    // Added: Process monitor visual
+    'nslookup *', // Added: DNS queries
+    'dig *',   // Added: DNS queries
+    'whois *', // Added: Domain queries
 
     // ── File operations (SPECIFIC patterns only — no broad 'rm *' wildcard!) ──
     'mkdir *',
@@ -76,18 +88,33 @@ const DEFAULT_TRUSTED_PATTERNS = [
     // chmod — specific safe patterns only (NOT 'chmod *')
     // chown — never auto-trusted
 
-    // ── Download (SPECIFIC patterns — no broad 'curl *' wildcard!) ──
+    // ── Download & Network (Specific SAFE fetch commands) ──
     'tar *',
     'unzip *',
     'zip *',
     'gzip *',
     'gunzip *',
-    // curl/wget — NOT auto-trusted (could be 'curl | sh')
+    // curl/wget — Broad patterns NOT trusted (could pipe to sh)
+    // Only trust explicit safe fetch commands often used to read docs:
+    'curl -I *',
+    'curl -s *',
+    'curl -L https://*',
+    'wget -qO- https://*',
+
+    // ── Data & Code Search ──
+    'jq *',
+    'yq *',
+    'sqlite3 *',
+    'rg *',    // ripgrep
+    'ag *',    // the silver searcher
+    'fd *',    // fd find
+    'tree *',
 
     // ── Node.js (specific safe sub-commands with wildcards for pipes/redirects) ──
     'npm run *',
     'npm test*',        // matches: npm test, npm test 2>&1 | tail -10
     'npm start*',       // matches: npm start, npm start -- --port=3000
+    'npm install',      // Added: npm install without args
     'npm install*',     // matches: npm install, npm install --save
     'npm ci*',          // matches: npm ci, npm ci --prefer-offline
     'npm list*',
@@ -99,11 +126,14 @@ const DEFAULT_TRUSTED_PATTERNS = [
     'npx -y *',
     'npx --yes *',
     'node *',
+    'deno *',           // Added: Deno
     'yarn run *',
+    'yarn install',     // Added
     'yarn install*',
     'yarn test*',
     'yarn start*',
     'pnpm run *',
+    'pnpm install',     // Added
     'pnpm install*',
     'pnpm test*',
     'bun *',
@@ -123,16 +153,19 @@ const DEFAULT_TRUSTED_PATTERNS = [
     'nuxt *',
     'nx *',
     'turbo *',
+    'biome *',          // Added: Biome JS toolchain
 
     // ── Python (specific safe patterns) ──
     'python *',
     'python3 *',
+    'pip install',      // Added: pip install without args
     'pip install *',
     'pip3 install *',
     'pip list*',
     'pip show *',
     'pipenv *',
     'poetry *',
+    'conda *',          // Added: Anaconda
     'pytest *',
     'mypy *',
     'black *',
@@ -165,6 +198,7 @@ const DEFAULT_TRUSTED_PATTERNS = [
     // ── Other languages ──
     'cargo *',
     'rustc *',
+    'rustup *',         // Added: Rustup
     'go *',
     'java *',
     'javac *',
@@ -179,6 +213,8 @@ const DEFAULT_TRUSTED_PATTERNS = [
     'swiftc *',
     'php *',
     'composer *',
+    'lua *',            // Added: Lua
+    'perl *',           // Added: Perl
 
     // ── Build tools ──
     'make *',
@@ -187,6 +223,25 @@ const DEFAULT_TRUSTED_PATTERNS = [
     'g++ *',
     'clang *',
 
+    // ── Mobile / iOS / Android ──
+    'flutter *',        // Added: Flutter
+    'dart *',           // Added: Dart
+    'pod *',            // Added: CocoaPods / iOS
+    'xcodebuild *',     // Added: Xcode tasks
+    'adb *',            // Added: Android Debug Bridge
+    'fastlane *',       // Added: Fastlane deployment
+
+    // ── Cloud / Serverless ──
+    'aws *',            // Added: AWS CLI
+    'gcloud *',         // Added: Google Cloud CLI
+    'firebase *',       // Added: Firebase CLI
+    'supabase *',       // Added: Supabase CLI
+    'vercel *',         // Added: Vercel CLI
+    'netlify *',        // Added: Netlify CLI
+    'heroku *',         // Added: Heroku CLI
+    'doctl *',          // Added: DigitalOcean CLI
+    'sls *',            // Added: Serverless CLI
+
     // ── Containers (specific safe patterns — NOT broad 'docker *') ──
     'docker build *',
     'docker run *',
@@ -194,22 +249,24 @@ const DEFAULT_TRUSTED_PATTERNS = [
     'docker images*',
     'docker logs *',
     'docker-compose *',
+    'podman *',         // Added: Podman container engine
     'kubectl get *',
     'kubectl describe *',
     'kubectl logs *',
 
-    // ── macOS / misc ──
+    // ── macOS / Windows misc ──
     'brew *',
     'defaults *',
     'pbcopy',
     'pbpaste',
     'osascript *',
     'screencapture *',
+    'code *',           // Added: VS Code CLI
 ];
 
 // Dangerous patterns that should always require approval
 const DEFAULT_DENYLIST = [
-    // ── Filesystem destruction ──
+    // ── Filesystem destruction (Linux/macOS) ──
     'rm -rf /',
     'rm -rf ~',
     'rm -rf /*',
@@ -230,23 +287,38 @@ const DEFAULT_DENYLIST = [
     'dd if=',
     'mkfs.',
     'shred /dev',
-    // ── Pipe to shell ──
+
+    // ── Filesystem destruction (Windows) ──
+    'del /s /q C:\\',
+    'rmdir /s /q C:\\',
+    'format C:',
+    'diskpart',
+
+    // ── Pipe to shell (Cross-platform Exfiltration & Injection) ──
     'curl | sh',
     'curl | bash',
     'wget | sh',
     'wget | bash',
     'curl -s | sh',
     'wget -q | sh',
+    'wget -O- | sh',         // Added: Stream output to sh
+    'wget -O- | bash',       // Added: Stream output to bash
+    'curl -L | bash',        // Added: Chase redirect to bash
+    'Invoke-WebRequest',     // Added: Windows common fetch target
+    'IEX (New-Object',       // Added: PowerShell runtime exec
+
     // ── Git dangerous ──
     'git push --force',
     'git push -f',
     'git reset --hard',
     'git clean -fdx /',
-    // ── SQL injection ──
+
+    // ── SQL injection & DB wipe ──
     'drop table',
     'drop database',
     'truncate table',
     'delete from',
+
     // ── System control ──
     'shutdown',
     'reboot',
@@ -255,7 +327,8 @@ const DEFAULT_DENYLIST = [
     'kill -9',
     'killall',
     ':(){:|:&};:',
-    // ── macOS attacks ──
+
+    // ── macOS & Windows specific attacks ──
     'security dump-keychain',
     'security delete-keychain',
     'xattr -c ',
@@ -263,9 +336,14 @@ const DEFAULT_DENYLIST = [
     'launchctl load',
     'launchctl submit',
     'crontab -r',
+    'ExecutionPolicy Bypass', // Added: Windows run script bypass
+    'powershell -e',         // Added: PowerShell Base64 payload
+    'powershell -EncodedCommand', // Added: PowerShell Base64 payload
+
     // ── Environment hijacking ──
     'DYLD_INSERT_LIBRARIES',
     'LD_PRELOAD',
+
     // ── Reverse shells & exfiltration ──
     '/dev/tcp/',
     'nc -e',
@@ -273,10 +351,12 @@ const DEFAULT_DENYLIST = [
     'base64 -d | sh',
     'history | sh',
     'history | bash',
+
     // ── Credential access ──
     '.ssh/id_rsa',
     '.aws/credentials',
     'printenv',
+
     // ── Prompt injection guard ──
     'trustedCommands',     // Block AI from modifying trust settings
     'commandDenylist',     // Block AI from modifying deny settings
