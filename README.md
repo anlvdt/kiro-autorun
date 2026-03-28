@@ -30,7 +30,7 @@ Instead of reading the screen or taking over your mouse, it hooks directly into 
 ## Key Features
 
 - **Layer 0 Native APIs** - Instantly reads internal pending executions and invokes `executeCommand('kiroAgent.execution.runOrAcceptAll')` directly.
-- **Smart safety (Deny-list)** - 28+ banned keywords are intercepted. Inherently dangerous commands (like `rm -rf /` or `curl | bash`) are blocked *before* they can run.
+- **Smart safety (Deny-list)** - 70+ cross-platform banned keywords (Linux, macOS, Windows) are intercepted. Inherently dangerous commands (like `rm -rf /`, `curl | bash`, or PowerShell exploits) are blocked *before* they can run.
 - **Auto-learning (Machine Memory)** - Tracks how often a specific tool/command is invoked safely. Once a command proves benign repeatedly, it is dynamically learned and added to Kiro's internal `trustedCommands`.
 - **NEVER_LEARN strict guard** - Highly dangerous base commands (`rm`, `sudo`, `curl`) are systematically guarded and will *never* be auto-trusted.
 - **Premium Ops Dashboard** - A modern, glassmorphic UI integrated right inside Kiro to visualize your approval metrics, blocked commands, and up-time gracefully.
@@ -54,7 +54,7 @@ Or search for **"Kiro AutoRun"** in the Extensions panel (`Cmd+Shift+X`).
 |---|---|---|
 | `kiroAutorun.enabled` | `true` | Enable/disable Native auto-approval |
 | `kiroAutorun.pollInterval` | `2` | Seconds between checking the internal execution queue |
-| `kiroAutorun.bannedKeywords` | *(28 dangerous patterns)* | If any execute natively, auto-run is **blocked** |
+| `kiroAutorun.bannedKeywords` | *(70+ dangerous patterns)* | If any execute natively, auto-run is **blocked** |
 
 *Legacy targetApp, OCR limits, and Recovery settings have been permanently retired due to the modern Native architecture.*
 
@@ -74,7 +74,7 @@ Or search for **"Kiro AutoRun"** in the Extensions panel (`Cmd+Shift+X`).
 - **Banned keywords** - intercepts native command streams prior to execution approval.
 - **Pipe-to-shell detection** - denies obscure background executions routing to untrusted bins. 
 - **NEVER_LEARN** - strictly denies training behavior against OS-level destruction patterns.
-Default banned keywords include: `rm -rf`, `sudo rm`, `chmod 777`, `curl | sh`, `git push --force`, `drop table`, `shutdown`, `kill -9`, fork bombs, reverse shells, etc.
+Default banned keywords include: `rm -rf`, `sudo rm`, `chmod 777`, `curl | sh`, `git push --force`, `drop table`, `shutdown`, `kill -9`, PowerShell `ExecutionPolicy Bypass`, reverse shells, etc.
 
 ## Author
 
